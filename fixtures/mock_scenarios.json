@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "scenarios": {
+    "complete": {
+      "actions": {},
+      "expected_exit": 0,
+      "expected_state": "complete",
+      "expected_agent_call_counts": {
+        "claude": 2,
+        "codex": 4
+      }
+    },
+    "success": {
+      "actions": {},
+      "expected_exit": 0,
+      "expected_state": "complete"
+    },
+    "resume_completed_artifact": {
+      "actions": {},
+      "expected_exit": 0,
+      "expected_state": "complete"
+    },
+    "max_turns_complete": {
+      "actions": {
+        "02": "max_turns_complete"
+      },
+      "expected_exit": 0,
+      "expected_state": "complete"
+    },
+    "max_turns_useful_partial": {
+      "actions": {
+        "02": "max_turns_useful_partial"
+      },
+      "expected_exit": 0,
+      "expected_state": "complete",
+      "expect_failed_output": true
+    },
+    "one_shot_completion_retry_exhausted": {
+      "actions": {
+        "02": "max_turns_useful_partial"
+      },
+      "completion_retry_outcome": "malformed_artifact",
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "max_turns_unusable": {
+      "actions": {
+        "02": "max_turns_unusable"
+      },
+      "expected_exit": 3,
+      "expected_state": "awaiting_retry_approval",
+      "expect_failed_output": true
+    },
+    "malformed_then_success": {
+      "actions": {
+        "02": [
+          "malformed_artifact",
+          "success"
+        ]
+      },
+      "expected_exit": 0,
+      "expected_state": "complete",
+      "expect_failed_output": true
+    },
+    "empty_then_success": {
+      "actions": {
+        "02": [
+          "empty_output",
+          "success"
+        ]
+      },
+      "expected_exit": 0,
+      "expected_state": "complete",
+      "expect_failed_output": true
+    },
+    "malformed_gate_blocks": {
+      "actions": {
+        "03": "malformed_gate"
+      },
+      "attempt_budget": 1,
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "missing_gate_key_blocks": {
+      "actions": {
+        "03": "missing_gate_key"
+      },
+      "attempt_budget": 1,
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "wrong_gate_type_blocks": {
+      "actions": {
+        "03": "wrong_gate_type"
+      },
+      "attempt_budget": 1,
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "timeout_then_success": {
+      "actions": {
+        "02": [
+          "timeout",
+          "success"
+        ]
+      },
+      "expected_exit": 0,
+      "expected_state": "complete",
+      "expect_failed_output": true
+    },
+    "usage_limit_fallback": {
+      "actions": {
+        "02": [
+          "usage_limit",
+          "success"
+        ]
+      },
+      "expected_exit": 0,
+      "expected_state": "complete"
+    },
+    "rate_limit_with_reset_fallback": {
+      "actions": {
+        "02": [
+          "rate_limit_with_reset",
+          "success"
+        ]
+      },
+      "expected_exit": 0,
+      "expected_state": "complete"
+    },
+    "rate_limit_no_reset_blocks": {
+      "actions": {
+        "02": "rate_limit_no_reset"
+      },
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "permission_error_blocks": {
+      "actions": {
+        "02": "permission_error"
+      },
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "sandbox_environment_blocks": {
+      "actions": {
+        "02": "sandbox_environment"
+      },
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "process_interrupted": {
+      "actions": {
+        "02": "process_interrupted"
+      },
+      "expected_exit": 130,
+      "expected_state": "ready",
+      "expect_failed_output": true
+    },
+    "source_failure_blocks": {
+      "actions": {
+        "02": "source_failure"
+      },
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "unknown_failure_blocks": {
+      "actions": {
+        "02": "unknown_failure"
+      },
+      "expected_exit": 3,
+      "expected_state": "blocked",
+      "expect_failed_output": true
+    },
+    "human_checkpoint": {
+      "actions": {},
+      "stop_for_human_test": true,
+      "expected_exit": 3,
+      "expected_state": "awaiting_human_test"
+    },
+    "final_decision_checkpoint": {
+      "actions": {},
+      "stop_for_final_decision": true,
+      "expected_exit": 3,
+      "expected_state": "awaiting_final_decision"
+    },
+    "continuity_degraded_review": {
+      "actions": {
+        "04": [
+          "usage_limit",
+          "success"
+        ],
+        "04_gate": [
+          "usage_limit",
+          "success"
+        ]
+      },
+      "safety_mode": "continuity",
+      "allow_degraded_same_agent_review": true,
+      "expected_exit": 0,
+      "expected_state": "complete"
+    },
+    "primary_and_fallback_unavailable": {
+      "actions": {
+        "04_gate": [
+          "usage_limit",
+          "usage_limit"
+        ]
+      },
+      "expected_exit": 3,
+      "expected_state": "blocked"
+    }
+  }
+}
