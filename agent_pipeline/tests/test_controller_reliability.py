@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import io
+import inspect
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -235,6 +236,74 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(len(state["stage_gate_passes"]), 1)
             self.assertFalse(state["stage_gate_passes"][0]["accepted"])
 
+    def test_stage4_gate_loop_forces_pass2_after_rejected_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-gate-resume-pass2"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01", "02", "03", "04"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            (task_dir / CONTRACTS["04_gate"].filename).write_text(
+                gate_artifact(
+                    "04_gate",
+                    "ready_for_implementation: false\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []",
+                ),
+                encoding="utf-8",
+            )
+            state = new_state(task, "run-test")
+            reconcile_artifacts(task_dir, state)
+            self.assertIn("04", state["completed_stages"])
+            self.assertIn("04_gate", state["completed_stages"])
+            state["stage_gate_passes"] = [{"pass": 1, "accepted": False}]
+            calls = []
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False):
+                calls.append((stage_key, pass_number, force))
+                (task_dir_arg / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+                if stage_key not in state_arg["completed_stages"]:
+                    state_arg["completed_stages"].append(stage_key)
+                return EXIT_SUCCESS
+
+            original = controller.ensure_real_stage
+            controller.ensure_real_stage = fake_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original))
+
+            code = controller.run_stage4_gate_loop(task_dir, state, {"max_gate_passes": 2}, {})
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(calls, [("04", 2, True), ("04_gate", 2, True)])
+
+    def test_stage4_gate_loop_pass1_force_still_tracks_completed_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-gate-pass1-force"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01", "02", "03", "04"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            (task_dir / CONTRACTS["04_gate"].filename).write_text(
+                gate_artifact(
+                    "04_gate",
+                    "ready_for_implementation: false\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []",
+                ),
+                encoding="utf-8",
+            )
+            state = new_state(task, "run-test")
+            reconcile_artifacts(task_dir, state)
+            calls = []
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False):
+                calls.append((stage_key, pass_number, force))
+                return EXIT_SUCCESS
+
+            original = controller.ensure_real_stage
+            controller.ensure_real_stage = fake_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original))
+
+            code = controller.run_stage4_gate_loop(task_dir, state, {"max_gate_passes": 1}, {})
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(calls, [("04", 1, False), ("04_gate", 1, False)])
+
     def test_stage4_gate_loop_archives_brief_before_identical_revision_block(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = "stage4-archive-identical"
@@ -277,6 +346,33 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertTrue((task_dir / "04_final_codex_brief.pass-2.md").exists())
             self.assertTrue((task_dir / "04_final_brief_audit.pass-1.md").exists())
             self.assertFalse((task_dir / "04_final_brief_audit.pass-2.md").exists())
+
+    def test_normalize_stage_output_strips_commentary_before_stage7_heading(self):
+        output = "Provider note.\n\n# Stage 7 - Diff review\n\nBody.\n"
+
+        self.assertEqual(
+            controller.normalize_stage_output("07", output),
+            "# Stage 7 - Diff review\n\nBody.\n",
+        )
+
+    def test_normalize_stage_output_strips_commentary_before_legacy_heading(self):
+        output = "Provider note.\n\n# Stage 5 - Codex implementation report\n\nBody.\n"
+
+        self.assertEqual(
+            controller.normalize_stage_output("05", output),
+            "# Stage 5 - Codex implementation report\n\nBody.\n",
+        )
+
+    def test_normalize_stage_output_returns_original_when_no_heading_matches(self):
+        output = "Provider note.\n\nNo accepted artifact heading.\n"
+
+        self.assertIs(controller.normalize_stage_output("07", output), output)
+        self.assertIs(controller.normalize_stage_output("not_a_stage", output), output)
+
+    def test_ensure_real_stage_success_path_has_single_unconditional_return(self):
+        source = inspect.getsource(controller.ensure_real_stage)
+
+        self.assertNotIn('result.get("failure_class") in (None, FAILURE_CLASS_MAX_TURNS, FAILURE_CLASS_UNKNOWN_FAILURE)', source)
 
     def test_stage4_prompt_uses_contract_section_lines(self):
         with tempfile.TemporaryDirectory() as tmp:

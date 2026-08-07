@@ -480,8 +480,8 @@ def run_stage4_gate_loop(task_dir, state, config, assignments):
         return EXIT_SUCCESS
     max_passes = int(config.get("max_gate_passes", 2))
     pass_number = len(state.get("stage_gate_passes") or []) + 1
-    force_brief = "04" not in state.get("completed_stages", [])
-    force_audit = "04_gate" not in state.get("completed_stages", [])
+    force_brief = pass_number > 1 or "04" not in state.get("completed_stages", [])
+    force_audit = pass_number > 1 or "04_gate" not in state.get("completed_stages", [])
     previous_rejection = None
     while pass_number <= max_passes:
         code = ensure_real_stage(task_dir, state, config, "04", "read-only", assignments, pass_number=pass_number, force=force_brief)
@@ -586,8 +586,6 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             assignments[stage_key] = agent
             state.setdefault("stage_agents", {})[stage_key] = agent
             append_log(task_dir, {"event": "artifact_finalization", "stage": stage_key, "pass": pass_number, "attempt": attempt_number, "provider": agent, "artifact_hash": result.get("final_artifact_hash"), "run_id": state.get("run_id")})
-            if result.get("failure_class") in (None, FAILURE_CLASS_MAX_TURNS, FAILURE_CLASS_UNKNOWN_FAILURE):
-                return EXIT_SUCCESS
             return EXIT_SUCCESS
         failure_class = result.get("failure_class") or final["validation"].get("failure_class")
         preserve_failed(task_dir, stage_key, raw_output, failure_class or FAILURE_CLASS_MALFORMED_ARTIFACT, {"agent": agent, "metadata_path": result.get("metadata_path")})
@@ -1083,20 +1081,24 @@ def source_snapshot():
 
 def normalize_stage_output(stage_key, output):
     """Remove harmless provider commentary before a required artifact heading."""
-    if stage_key != "04_gate":
+    contract = CONTRACTS.get(stage_key)
+    if not contract:
         return output
 
     stripped = output.lstrip()
-    heading = CONTRACTS[stage_key].heading
+    headings = [contract.heading]
+    if contract.legacy_heading:
+        headings.append(contract.legacy_heading)
 
-    if stripped.startswith(heading):
-        return stripped
+    for heading in headings:
+        if stripped.startswith(heading):
+            return stripped
 
-    marker = "\n" + heading
-    heading_index = stripped.find(marker)
+        marker = "\n" + heading
+        heading_index = stripped.find(marker)
 
-    if heading_index >= 0:
-        return stripped[heading_index + 1:]
+        if heading_index >= 0:
+            return stripped[heading_index + 1:]
 
     return output
 
