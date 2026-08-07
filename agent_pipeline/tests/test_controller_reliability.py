@@ -223,6 +223,40 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(state["completed_stages"], [])
             self.assertEqual(state["current_stage"], "00")
 
+    def test_fresh_stage5_success_is_checkpointed_before_postprocessing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage5-checkpoint"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01", "02", "03", "04", "04_gate"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            state = new_state(task, "run-test")
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False):
+                if stage_key == "05":
+                    (task_dir_arg / CONTRACTS["05"].filename).write_text(valid_artifact("05"), encoding="utf-8")
+                return EXIT_SUCCESS
+
+            def fail_postprocessing(*args, **kwargs):
+                raise RuntimeError("postprocessing reached")
+
+            original_ensure = controller.ensure_real_stage
+            original_report = controller.stage5_report_provenance
+            original_capture = controller.capture_dirty_baseline
+            controller.ensure_real_stage = fake_ensure
+            controller.stage5_report_provenance = fail_postprocessing
+            controller.capture_dirty_baseline = lambda root: {"captured_at": "now", "entries": [], "hashes": {}}
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original_ensure))
+            self.addCleanup(lambda: setattr(controller, "stage5_report_provenance", original_report))
+            self.addCleanup(lambda: setattr(controller, "capture_dirty_baseline", original_capture))
+
+            with self.assertRaisesRegex(RuntimeError, "postprocessing reached"):
+                controller.run_real_pipeline(task_dir, task, state, {"max_gate_passes": 1}, allow_dirty=True)
+
+            persisted = load_state(task_dir, task)
+            self.assertIn("05", persisted["completed_stages"])
+            self.assertEqual(persisted["current_stage"], "06")
+
     def test_stage4_gate_loop_does_not_short_circuit_rejected_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = "stage4-gate-rejected"

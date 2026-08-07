@@ -239,11 +239,8 @@ def validate_text(text, contract, read_only=False):
         }
     if contract.body_required and not "\n".join(lines[1:]).strip():
         return {"valid": False, "reason": "body is empty", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
-    present_sections = set()
-    for line in lines:
-        match = re.match(r"^##\s+(.+?)\s*$", line)
-        if match:
-            present_sections.add(match.group(1))
+    sections = collect_sections(lines)
+    present_sections = set(sections)
     missing_sections = []
     if contract.filename == "06_manual_test_notes.md":
         if "Decision" not in present_sections and "Overall manual result" not in present_sections:
@@ -256,6 +253,13 @@ def validate_text(text, contract, read_only=False):
         return {
             "valid": False,
             "reason": "missing sections: " + ", ".join(missing_sections),
+            "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
+        }
+    empty_section = first_empty_required_section(contract, sections)
+    if empty_section is not None:
+        return {
+            "valid": False,
+            "reason": "section has no body content: " + empty_section,
             "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
     if contract.gate:
@@ -276,6 +280,12 @@ def validate_text(text, contract, read_only=False):
                     "reason": "wrong gate value type: " + key,
                     "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
                 }
+        if gate.get("ready_for_implementation") is True and gate.get("blocking_issues"):
+            return {
+                "valid": False,
+                "reason": "ready_for_implementation is true but blocking_issues is non-empty",
+                "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
+            }
     if contract.final_line:
         non_empty = [line.strip() for line in lines if line.strip()]
         if not non_empty or non_empty[-1] not in ("accept", "reject", "needs_followup"):
@@ -300,6 +310,43 @@ def validate_text(text, contract, read_only=False):
         if not result["valid"]:
             return result
     return {"valid": True, "reason": "valid"}
+
+
+def collect_sections(lines):
+    sections = {}
+    current = None
+    for line in lines:
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            current = match.group(1)
+            sections.setdefault(current, []).append([])
+            continue
+        if current is not None:
+            sections[current][-1].append(line)
+    return sections
+
+
+def first_empty_required_section(contract, sections):
+    if contract.filename == "06_manual_test_notes.md":
+        result_sections = []
+        result_sections.extend(sections.get("Decision", []))
+        result_sections.extend(sections.get("Overall manual result", []))
+        if result_sections and not any(section_body_has_content(section) for section in result_sections):
+            return "Decision or Overall manual result"
+        return None
+    for section in contract.sections:
+        bodies = sections.get(section, [])
+        if bodies and not any(section_body_has_content(body) for body in bodies):
+            return section
+    return None
+
+
+def section_body_has_content(body_lines):
+    for raw_line in body_lines:
+        line = raw_line.strip()
+        if line and not re.match(r"^##\s+.+?\s*$", line):
+            return True
+    return False
 
 
 def validate_manual_test_outcome(text):

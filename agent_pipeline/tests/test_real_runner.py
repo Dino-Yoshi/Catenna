@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -139,25 +140,35 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify(-2, "", "", agent=None), "process_interrupted")
 
     def test_max_turns_substring(self):
-        self.assertEqual(classify(1, "hit the max turns limit", "", agent=None), "max_turns")
+        self.assertEqual(classify(1, "hit the max turns limit", "", agent=None), "unknown_failure")
         self.assertEqual(classify(1, "", "maximum turns exceeded", agent=None), "max_turns")
 
     def test_usage_limit_substring(self):
-        self.assertEqual(classify(1, "usage limit reached", "", agent=None), "usage_limit")
-        self.assertEqual(classify(1, "billing issue", "", agent=None), "usage_limit")
+        self.assertEqual(classify(1, "usage limit reached", "", agent=None), "unknown_failure")
+        self.assertEqual(classify(1, "", "usage limit reached", agent=None), "usage_limit")
+        self.assertEqual(classify(1, "", "billing issue", agent=None), "usage_limit")
 
     def test_rate_limit_substring(self):
-        self.assertEqual(classify(1, "rate limit hit", "", agent=None), "rate_limit")
-        self.assertEqual(classify(1, "too many requests", "", agent=None), "rate_limit")
+        self.assertEqual(classify(1, "rate limit hit", "", agent=None), "unknown_failure")
+        self.assertEqual(classify(1, "", "rate limit hit", agent=None), "rate_limit")
+        self.assertEqual(classify(1, "", "too many requests", agent=None), "rate_limit")
 
     def test_permission_substring(self):
-        self.assertEqual(classify(1, "permission denied", "", agent=None), "permission_error")
+        self.assertEqual(classify(1, "permission denied", "", agent=None), "unknown_failure")
+        self.assertEqual(classify(1, "", "permission denied", agent=None), "permission_error")
+        self.assertEqual(classify(1, "", "operation not permitted", agent=None), "permission_error")
+        self.assertEqual(classify(1, "", "permission requested", agent=None), "unknown_failure")
+        self.assertEqual(classify(1, "", "request denied", agent=None), "unknown_failure")
 
     def test_sandbox_substring(self):
-        self.assertEqual(classify(1, "sandbox violation", "", agent=None), "sandbox_environment")
+        self.assertEqual(classify(1, "sandbox violation", "", agent=None), "unknown_failure")
+        self.assertEqual(classify(1, "", "sandbox violation", agent=None), "sandbox_environment")
 
     def test_negative_one_without_other_signal_is_timeout(self):
         self.assertEqual(classify(-1, "nothing recognizable", "", agent=None), "timeout")
+
+    def test_timeout_exit_code_precedes_stderr_fallback(self):
+        self.assertEqual(classify(-1, "", "usage limit reached", agent=None), "timeout")
 
     def test_unrecognized_nonzero_exit_is_unknown_failure(self):
         self.assertEqual(classify(1, "totally unrelated output", "", agent=None), "unknown_failure")
@@ -169,6 +180,10 @@ class ClassifyTests(unittest.TestCase):
     def test_classify_uses_supplied_events(self):
         events = [{"type": "result", "subtype": "error_max_turns", "is_error": True}]
         self.assertEqual(classify(1, "not json", "", agent="claude", events=events), "max_turns")
+
+    def test_structured_stdout_still_classifies_with_empty_stderr(self):
+        stdout = '{"type":"result","subtype":"error_max_turns","is_error":true}'
+        self.assertEqual(classify(1, stdout, "", agent="claude"), "max_turns")
 
 
 class RunToFilesTests(unittest.TestCase):
@@ -201,6 +216,60 @@ class RunToFilesTests(unittest.TestCase):
                         on_launch=lambda: launched.append(True),
                     )
             self.assertEqual(launched, [])
+
+    def test_timeout_kills_child_process_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            child_pid_path = root / "child.pid"
+            code = (
+                "import subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "open(sys.argv[1], 'w').write(str(child.pid))\n"
+                "time.sleep(60)\n"
+            )
+
+            exit_code, timed_out = run_to_files(
+                ["python3", "-c", code, str(child_pid_path)],
+                root / "stdout.txt",
+                root / "stderr.txt",
+                1,
+            )
+
+            self.assertEqual(exit_code, -1)
+            self.assertTrue(timed_out)
+            self.assertTrue(child_pid_path.exists())
+            child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+            deadline = time.time() + 5
+            while time.time() < deadline and self.pid_is_live(child_pid):
+                time.sleep(0.05)
+            if self.pid_is_live(child_pid):
+                try:
+                    real_runner.os.kill(child_pid, real_runner.signal.SIGKILL)
+                except Exception:
+                    pass
+                self.fail("timed-out child process was still live")
+
+    def test_timeout_falls_back_when_process_group_kill_fails(self):
+        process = mock.Mock()
+        process.pid = 12345
+        process.communicate.side_effect = [real_runner.subprocess.TimeoutExpired(["cmd"], 1), (b"", b"")]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(real_runner.subprocess, "Popen", return_value=process):
+                with mock.patch.object(real_runner.os, "killpg", side_effect=OSError("no pg")):
+                    exit_code, timed_out = run_to_files(["cmd"], root / "stdout.txt", root / "stderr.txt", 1)
+
+        self.assertEqual((exit_code, timed_out), (-1, True))
+        process.kill.assert_called_once_with()
+
+    def pid_is_live(self, pid):
+        try:
+            real_runner.os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
 
 
 class ExtractCandidateTests(unittest.TestCase):

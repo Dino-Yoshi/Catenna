@@ -415,6 +415,7 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
     reconcile_artifacts(task_dir, state, read_only=False)
     if stage5_current_run:
         clamp_completed_prefix(state, "05")
+        write_state_atomic(task_dir, state)
 
     if "06" not in state.get("completed_stages", []):
         report_check = stage5_report_provenance(task_dir, state)

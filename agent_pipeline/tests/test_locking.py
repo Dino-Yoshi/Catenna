@@ -45,6 +45,19 @@ class LockingTests(unittest.TestCase):
         self.assertIn("explicit unlock required", str(raised.exception))
         self.assertFalse(raised.exception.unlockable)
 
+    def test_atomic_open_race_raises_lock_error(self):
+        def race(*args, **kwargs):
+            self.write_lock(os.getpid())
+            raise FileExistsError()
+
+        with patch("agent_pipeline.locking.os.open", side_effect=race):
+            with self.assertRaises(LockError) as raised:
+                with TaskLock(self.task_dir, "test", "run-1"):
+                    pass
+
+        self.assertIn("explicit unlock required", str(raised.exception))
+        self.assertFalse(raised.exception.unlockable)
+
     def test_stale_lock_diagnostic_marks_unlockable(self):
         self.write_lock(999999999)
 

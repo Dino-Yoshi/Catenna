@@ -119,7 +119,7 @@ class RealPipelineTests(unittest.TestCase):
                     return "\\n".join(out).rstrip() + "\\n"
 
                 if os.environ.get("FAKE_USAGE_LIMIT_ON_SANDBOX") == "1" and "--sandbox" in sys.argv:
-                    sys.stdout.write("usage limit reached for this account\\n")
+                    sys.stderr.write("usage limit reached for this account\\n")
                     sys.exit(1)
 
                 prompt = ""

@@ -57,7 +57,10 @@ class TaskLock(object):
             "run_id": self.run_id,
         }
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        fd = os.open(str(self.path), flags, 0o644)
+        try:
+            fd = os.open(str(self.path), flags, 0o644)
+        except FileExistsError:
+            self._raise_existing()
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")

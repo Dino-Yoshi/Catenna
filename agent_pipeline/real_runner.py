@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import time
@@ -169,6 +170,7 @@ def run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=Non
                 stderr=stderr_handle,
                 cwd=str(cwd) if cwd is not None else None,
                 env=env,
+                start_new_session=True,
             )
             if on_launch is not None:
                 on_launch()
@@ -179,7 +181,13 @@ def run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=Non
                 )
                 return process.returncode, False
             except subprocess.TimeoutExpired:
-                process.kill()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
                 process.communicate()
                 return -1, True
 
@@ -280,21 +288,21 @@ def classify(exit_code, stdout_text, stderr_text, agent=None, events=None):
     structured = stream_events.structured_failure(agent, stdout_text, events=events)
     if structured:
         return structured
-    combined = (stdout_text + "\n" + stderr_text).lower()
     if exit_code in (130, -2):
         return FAILURE_CLASS_PROCESS_INTERRUPTED
-    if "max turns" in combined or "maximum turns" in combined or "turn limit" in combined:
-        return FAILURE_CLASS_MAX_TURNS
-    if "usage limit" in combined or "quota" in combined or "billing" in combined:
-        return FAILURE_CLASS_USAGE_LIMIT
-    if "rate limit" in combined or "too many requests" in combined:
-        return FAILURE_CLASS_RATE_LIMIT
-    if "permission" in combined or "denied" in combined:
-        return FAILURE_CLASS_PERMISSION_ERROR
-    if "sandbox" in combined:
-        return FAILURE_CLASS_SANDBOX_ENVIRONMENT
     if exit_code == -1:
         return FAILURE_CLASS_TIMEOUT
+    fallback = stderr_text.lower()
+    if "max turns" in fallback or "maximum turns" in fallback or "turn limit" in fallback:
+        return FAILURE_CLASS_MAX_TURNS
+    if "usage limit" in fallback or "quota" in fallback or "billing" in fallback:
+        return FAILURE_CLASS_USAGE_LIMIT
+    if "rate limit" in fallback or "too many requests" in fallback:
+        return FAILURE_CLASS_RATE_LIMIT
+    if "permission denied" in fallback or "operation not permitted" in fallback:
+        return FAILURE_CLASS_PERMISSION_ERROR
+    if "sandbox" in fallback:
+        return FAILURE_CLASS_SANDBOX_ENVIRONMENT
     return FAILURE_CLASS_UNKNOWN_FAILURE
 
 
