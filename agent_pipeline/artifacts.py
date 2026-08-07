@@ -530,23 +530,24 @@ def parse_list_item(value):
     return parse_string(value)
 
 
+_DOUBLE_QUOTED_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"$')
+_SINGLE_QUOTED_RE = re.compile(r"^'((?:[^'\\]|\\.)*)'$")
+_ESCAPE_RE = re.compile(r"\\(.)")
+
+
 def parse_string(value):
     if value == "":
         return ""
-    if value.startswith('"') and value.endswith('"') and value.count('"') == 2:
-        return value[1:-1]
-    if value.startswith("'") and value.endswith("'") and value.count("'") == 2:
-        return value[1:-1]
+    match = _DOUBLE_QUOTED_RE.match(value) or _SINGLE_QUOTED_RE.match(value)
+    if match:
+        return _ESCAPE_RE.sub(r"\1", match.group(1))
     if re.match(r"^[A-Za-z0-9_ ./#:-]+$", value):
         return value
     return _INVALID
 
 
 def is_quoted(value):
-    return (
-        (value.startswith('"') and value.endswith('"') and value.count('"') == 2)
-        or (value.startswith("'") and value.endswith("'") and value.count("'") == 2)
-    )
+    return bool(_DOUBLE_QUOTED_RE.match(value) or _SINGLE_QUOTED_RE.match(value))
 
 
 def has_unquoted_hash(value):

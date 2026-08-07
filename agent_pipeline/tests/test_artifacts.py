@@ -128,6 +128,25 @@ class ArtifactValidationTests(unittest.TestCase):
         self.assertEqual(gate["blocking_issues"], ["B1: quoted text, with comma", "bare_identifier"])
         self.assertEqual(gate["nonblocking_issues"], [])
 
+    def test_yaml_gate_accepts_escaped_quotes_in_list_items(self):
+        text = gate_artifact(
+            "03",
+            "\n".join(
+                [
+                    "ready_for_implementation: true",
+                    "blocking_issues: []",
+                    "nonblocking_issues:",
+                    '  - "the value is \\"05\\" here, at file.py:12-19; note it."',
+                    "required_revision_targets: []",
+                ]
+            ),
+        )
+
+        result = validate_text(text, CONTRACTS["03"])
+        self.assertTrue(result["valid"], result)
+        gate = parse_gate(text)["gate"]
+        self.assertEqual(gate["nonblocking_issues"], ['the value is "05" here, at file.py:12-19; note it.'])
+
     def test_yaml_gate_rejects_orphan_and_nested_list_syntax(self):
         orphan = gate_artifact(
             "03",
