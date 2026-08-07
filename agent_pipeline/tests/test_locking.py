@@ -6,8 +6,9 @@ import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from agent_pipeline.locking import LockError, TaskLock, explicit_unlock, lock_path
+from agent_pipeline.locking import LockError, TaskLock, explicit_unlock, lock_path, pid_live
 from agent_pipeline.state import orchestrator_dir
 
 
@@ -64,6 +65,19 @@ class LockingTests(unittest.TestCase):
         self.assertEqual(len(archives), 1)
         archived = json.loads(archives[0].read_text(encoding="utf-8"))
         self.assertEqual(archived["unlock_reason"], "operator requested")
+
+    def test_pid_live_distinguishes_permission_dead_and_uncertain(self):
+        with patch("agent_pipeline.locking.os.kill", return_value=None):
+            self.assertTrue(pid_live(123))
+        with patch("agent_pipeline.locking.os.kill", side_effect=PermissionError()):
+            self.assertTrue(pid_live(123))
+        with patch("agent_pipeline.locking.os.kill", side_effect=ProcessLookupError()):
+            self.assertFalse(pid_live(123))
+        with patch("agent_pipeline.locking.os.kill", side_effect=OSError()):
+            self.assertIsNone(pid_live(123))
+        self.assertIsNone(pid_live("not-a-pid"))
+        self.assertIsNone(pid_live(0))
+        self.assertIsNone(pid_live(-1))
 
 
 if __name__ == "__main__":

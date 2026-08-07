@@ -50,6 +50,44 @@ class ReasoningCaptureConfigTests(unittest.TestCase):
         with self.assertRaises(config.ConfigError):
             config.validate_config(bad)
 
+    def test_requested_top_level_booleans_must_be_real_booleans(self):
+        for field in ("enable_auto_verified", "allow_degraded_same_agent_review"):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad[field] = "true"
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn(field, str(raised.exception))
+
+    def test_timeout_seconds_must_be_positive_integer_not_bool(self):
+        for value in (None, "30", True, 0, -1):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            if value is None:
+                del bad["timeout_seconds"]
+            else:
+                bad["timeout_seconds"] = value
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("timeout_seconds", str(raised.exception))
+
+    def test_turn_budgets_must_be_mapping_with_positive_integer_values(self):
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["turn_budgets"] = []
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("turn_budgets", str(raised.exception))
+
+        for value in ("5", False, 0, -1):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad["turn_budgets"]["05"] = value
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("turn_budgets.05", str(raised.exception))
+
+    def test_missing_individual_turn_budget_keys_remain_allowed(self):
+        cfg = config.deep_copy(config.DEFAULT_CONFIG)
+        del cfg["turn_budgets"]["05"]
+        self.assertTrue(config.validate_config(cfg))
+
 
 if __name__ == "__main__":
     unittest.main()

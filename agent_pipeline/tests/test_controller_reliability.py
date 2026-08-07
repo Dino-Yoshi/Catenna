@@ -208,6 +208,21 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(len(state["stage_gate_passes"]), 1)
 
+    def test_seed_validation_failure_clears_stale_completed_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "seed-invalid"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            state = new_state(task, "run-test")
+            state["completed_stages"] = ["00", "01", "02"]
+            state["current_stage"] = "03"
+
+            code = controller.run_real_pipeline(task_dir, task, state, {}, allow_dirty=True)
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(state["completed_stages"], [])
+            self.assertEqual(state["current_stage"], "00")
+
     def test_stage4_gate_loop_does_not_short_circuit_rejected_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = "stage4-gate-rejected"

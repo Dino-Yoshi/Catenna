@@ -6,6 +6,11 @@ import json
 import os
 from pathlib import Path
 
+try:
+    from collections.abc import Mapping
+except ImportError:  # pragma: no cover - Python 2 compatibility fallback.
+    from collections import Mapping
+
 
 CONFIG_PATH = Path(".agent-pipeline") / "config" / "orchestrator.json"
 
@@ -134,6 +139,19 @@ def validate_config(config):
     reasoning_capture = config.get("reasoning_capture", {})
     if not isinstance(reasoning_capture, dict) or not isinstance(reasoning_capture.get("enabled"), bool):
         raise ConfigError("reasoning_capture.enabled must be a boolean")
+    if not isinstance(config.get("enable_auto_verified"), bool):
+        raise ConfigError("enable_auto_verified must be a boolean")
+    if not isinstance(config.get("allow_degraded_same_agent_review"), bool):
+        raise ConfigError("allow_degraded_same_agent_review must be a boolean")
+    timeout_seconds = config.get("timeout_seconds")
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+        raise ConfigError("timeout_seconds must be a positive integer")
+    turn_budgets = config.get("turn_budgets", {})
+    if not isinstance(turn_budgets, Mapping):
+        raise ConfigError("turn_budgets must be a mapping")
+    for stage, budget in turn_budgets.items():
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+            raise ConfigError("turn_budgets.%s must be a positive integer" % stage)
     return True
 
 

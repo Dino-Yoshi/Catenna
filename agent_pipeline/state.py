@@ -212,7 +212,7 @@ def invalidated_from(stage_key):
     if stage_key == "04_gate":
         return ["05", "06", "07", "08"]
     if stage_key == "05":
-        return ["07", "08"]
+        return ["06", "07", "08"]
     if stage_key == "06":
         return ["07", "08"]
     if stage_key == "07":

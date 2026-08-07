@@ -22,10 +22,15 @@ def lock_path(task_dir):
 
 def pid_live(pid):
     try:
-        os.kill(int(pid), 0)
+        parsed = int(pid)
+        if parsed < 1:
+            return None
+        os.kill(parsed, 0)
         return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
     except Exception:
         return None
 

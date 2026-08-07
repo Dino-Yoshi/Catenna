@@ -365,6 +365,7 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
     for seed_stage in ("00", "01"):
         validation = validate_file(task_dir / CONTRACTS[seed_stage].filename, seed_stage, read_only=True)
         if not validation["valid"]:
+            state["completed_stages"] = []
             block_transition(task_dir, state, seed_stage, "Stage %s is missing or invalid: %s" % (seed_stage, validation["reason"]), validation.get("failure_class"))
             return EXIT_BLOCKED
 

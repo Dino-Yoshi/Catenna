@@ -18,6 +18,8 @@ def capture_dirty_baseline(repo_root):
     hashes = {}
     for entry in entries:
         path = entry_path(entry)
+        if not path:
+            continue
         full = repo_root / path
         if full.exists() and full.is_file():
             hashes[path] = sha256_file(full)
@@ -25,10 +27,19 @@ def capture_dirty_baseline(repo_root):
 
 
 def changed_files_since(repo_root, baseline):
-    before_paths = set(entry_path(entry) for entry in baseline.get("entries", []))
+    before_entries = baseline.get("entries", [])
+    before_paths = set()
+    for entry in before_entries:
+        path = entry_path(entry)
+        if path:
+            before_paths.add(path)
     before_hashes = baseline.get("hashes", {})
     after_entries = git_status(repo_root)
-    after_paths = set(entry_path(entry) for entry in after_entries)
+    after_paths = set()
+    for entry in after_entries:
+        path = entry_path(entry)
+        if path:
+            after_paths.add(path)
     changed = []
     for path in sorted(after_paths):
         full = repo_root / path
@@ -40,6 +51,14 @@ def changed_files_since(repo_root, baseline):
             changed.append({"path": path, "reason": "status_changed_after_stage5"})
         elif before_hashes.get(path) != after_hash:
             changed.append({"path": path, "reason": "pre_dirty_hash_changed_during_stage5"})
+    for path in sorted(before_paths - after_paths):
+        full = repo_root / path
+        before_hash = before_hashes.get(path)
+        if full.exists() and full.is_file():
+            if before_hash is None or sha256_file(full) != before_hash:
+                changed.append({"path": path, "reason": "reverted_to_clean_during_stage5"})
+        else:
+            changed.append({"path": path, "reason": "deleted_during_stage5"})
     return changed
 
 
@@ -82,6 +101,7 @@ def git_status(repo_root):
             "git",
             "status",
             "--porcelain=v1",
+            "-z",
             "--untracked-files=all",
             "--",
             ".",
@@ -89,10 +109,35 @@ def git_status(repo_root):
         ],
         cwd=str(repo_root),
     )
-    return [line for line in output.decode("utf-8", "replace").splitlines() if line.strip()]
+    return parse_git_status_z(output)
+
+
+def parse_git_status_z(output):
+    fields = output.decode("utf-8", "replace").split("\0")
+    entries = []
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if not record:
+            continue
+        status = record[:2]
+        path = record[3:] if len(record) > 3 else ""
+        if "R" in status or "C" in status:
+            if index < len(fields):
+                original = fields[index]
+                index += 1
+                entries.append("%s %s -> %s" % (status, original, path))
+            else:
+                entries.append(record)
+        else:
+            entries.append(record)
+    return entries
 
 
 def entry_path(entry):
+    if not isinstance(entry, str):
+        return ""
     path = entry[3:] if len(entry) > 3 else entry
     if " -> " in path:
         path = path.split(" -> ", 1)[1]
