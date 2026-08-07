@@ -9,7 +9,7 @@ from . import controller
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="python3 -m tools.agent_pipeline.cli")
+    parser = argparse.ArgumentParser(prog="python3 -m agent_pipeline.cli")
     sub = parser.add_subparsers(dest="command")
     add_task(sub.add_parser("status", help="show controller status")).set_defaults(func=lambda a: controller.status(a.task))
     add_task(sub.add_parser("dry-run", help="show resumable work without mutating state")).set_defaults(func=lambda a: controller.dry_run(a.task))

@@ -208,6 +208,18 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def set_env(self, name, value):
+        original = os.environ.get(name)
+        had_original = name in os.environ
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+        if had_original:
+            self.addCleanup(lambda: os.environ.__setitem__(name, original))
+        else:
+            self.addCleanup(lambda: os.environ.pop(name, None))
+
     def write_fake_gradlew(self, body):
         path = self.repo_root / "gradlew"
         path.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(body), encoding="utf-8")
@@ -226,7 +238,9 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["exit_code"], 0)
 
-    def test_sets_java_home_and_gradle_user_home_env(self):
+    def test_sets_default_java_home_and_gradle_user_home_env(self):
+        self.set_env("JAVA_HOME", None)
+        self.set_env(verification.GRADLE_JAVA_HOME_FALLBACK_ENV, None)
         self.write_fake_gradlew(
             """
             import os
@@ -235,6 +249,48 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
             """
         )
         result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+        self.assertEqual(result["status"], "passed")
+
+    def test_preserves_non_empty_caller_java_home(self):
+        self.set_env("JAVA_HOME", "/caller/java")
+        self.set_env(verification.GRADLE_JAVA_HOME_FALLBACK_ENV, "/fallback/java")
+        self.write_fake_gradlew(
+            """
+            import os
+            assert os.environ.get("JAVA_HOME") == "/caller/java"
+            """
+        )
+        result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+        self.assertEqual(result["status"], "passed")
+
+    def test_empty_caller_java_home_uses_configurable_fallback(self):
+        self.set_env("JAVA_HOME", "")
+        self.set_env(verification.GRADLE_JAVA_HOME_FALLBACK_ENV, "/fallback/java")
+        self.write_fake_gradlew(
+            """
+            import os
+            assert os.environ.get("JAVA_HOME") == "/fallback/java"
+            """
+        )
+        result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+        self.assertEqual(result["status"], "passed")
+
+    def test_env_overrides_win_over_generated_gradle_env(self):
+        self.set_env("JAVA_HOME", "/caller/java")
+        self.set_env(verification.GRADLE_JAVA_HOME_FALLBACK_ENV, "/fallback/java")
+        self.write_fake_gradlew(
+            """
+            import os
+            assert os.environ.get("JAVA_HOME") == "/override/java"
+            assert os.environ.get("GRADLE_USER_HOME") == "/override/gradle"
+            """
+        )
+        result = verification.run_gradle(
+            self.repo_root,
+            self.runs_dir,
+            "compileJava",
+            env_overrides={"JAVA_HOME": "/override/java", "GRADLE_USER_HOME": "/override/gradle"},
+        )
         self.assertEqual(result["status"], "passed")
 
     def test_nonzero_exit_is_failed_status(self):

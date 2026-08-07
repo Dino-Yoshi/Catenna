@@ -116,6 +116,7 @@ def validate_config(config):
     for stage in ("02", "03", "04", "04_gate", "05", "07", "overseer"):
         if stage not in config.get("roles", {}):
             raise ConfigError("missing role config for " + stage)
+    validate_role_agent_references(config)
     for agent in ("codex", "claude", "agy"):
         detail = config.get("agents", {}).get(agent)
         if not detail:
@@ -134,6 +135,24 @@ def validate_config(config):
     if not isinstance(reasoning_capture, dict) or not isinstance(reasoning_capture.get("enabled"), bool):
         raise ConfigError("reasoning_capture.enabled must be a boolean")
     return True
+
+
+def validate_role_agent_references(config):
+    agents = config.get("agents", {})
+    if not isinstance(agents, dict):
+        raise ConfigError("agents must be a mapping")
+    for role_name, role in config.get("roles", {}).items():
+        if not isinstance(role, dict):
+            raise ConfigError("role %s must be a mapping" % role_name)
+        primary = role.get("primary")
+        if primary not in agents:
+            raise ConfigError("role %s primary references unknown agent %r" % (role_name, primary))
+        fallbacks = role.get("fallbacks", [])
+        if not isinstance(fallbacks, list):
+            raise ConfigError("role %s fallbacks must be a list" % role_name)
+        for fallback in fallbacks:
+            if fallback not in agents:
+                raise ConfigError("role %s fallback references unknown agent %r" % (role_name, fallback))
 
 
 def configured_candidates(config, role_key):

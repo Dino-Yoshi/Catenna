@@ -8,8 +8,8 @@ from pathlib import Path
 
 from agent_pipeline import controller
 from agent_pipeline import usage
-from agent_pipeline.failures import EXIT_SUCCESS
-from agent_pipeline.mock_agent import valid_artifact
+from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS
+from agent_pipeline.mock_agent import gate_artifact, valid_artifact
 from agent_pipeline.runner import atomic_finalize
 from agent_pipeline.state import CONTRACTS, load_state, new_state, reconcile_artifacts, state_path, write_state_atomic
 
@@ -36,6 +36,26 @@ class ControllerReliabilityTests(unittest.TestCase):
         with redirect_stdout(output):
             code = controller.status(task)
         return code, output.getvalue()
+
+    def test_task_dir_for_accepts_safe_task_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+
+            for task in ("hardening-cheap-wins", "real-fixture", "task_1", "task.v2"):
+                self.assertEqual(controller.task_dir_for(task), (root / task).resolve())
+
+    def test_task_dir_for_rejects_unsafe_task_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+
+            for task in (None, "", "/tmp/x", "../x", "x/../y", "x/y", "x\\y", ".hidden", "-dash"):
+                with self.assertRaises(controller.ControllerError) as raised:
+                    controller.task_dir_for(task)
+                self.assertEqual(raised.exception.exit_code, EXIT_BAD_INPUT)
+
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_dry_run_reports_artifact_status_without_creating_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,6 +199,34 @@ class ControllerReliabilityTests(unittest.TestCase):
                 self.assertEqual(code, EXIT_SUCCESS)
 
             self.assertEqual(len(state["stage_gate_passes"]), 1)
+
+    def test_stage4_gate_loop_does_not_short_circuit_rejected_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-gate-rejected"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01", "02", "03", "04"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            (task_dir / CONTRACTS["04_gate"].filename).write_text(
+                gate_artifact(
+                    "04_gate",
+                    "ready_for_implementation: false\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []",
+                ),
+                encoding="utf-8",
+            )
+            state = new_state(task, "run-test")
+            reconcile_artifacts(task_dir, state)
+            self.assertIn("04_gate", state["completed_stages"])
+            config = {"max_gate_passes": 1}
+
+            code = controller.run_stage4_gate_loop(task_dir, state, config, {})
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(state["last_failure"]["stage"], "04_gate")
+            self.assertEqual(state["last_failure"]["failure_class"], "gate_pass_limit_exhausted")
+            self.assertEqual(state["completed_stages"], ["00", "01", "02", "03", "04"])
+            self.assertEqual(len(state["stage_gate_passes"]), 1)
+            self.assertFalse(state["stage_gate_passes"][0]["accepted"])
 
     def test_status_prints_active_cross_task_cooldowns(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -34,6 +34,7 @@ class VerificationError(Exception):
 # (PACKAGE_ROOT), never from the driven project's repo_root.
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
+GRADLE_JAVA_HOME_FALLBACK_ENV = "AGENT_PIPELINE_GRADLE_JAVA_HOME_FALLBACK"
 GRADLE_ENV_DEFAULTS = {"JAVA_HOME": "/usr/lib/jvm/java-8-openjdk-amd64"}
 UNIT_TEST_ARGS = ["-m", "unittest", "discover", "-s", "agent_pipeline/tests"]
 MOCK_PIPELINE_ARGS = ["-m", "agent_pipeline.cli", "mock-test"]
@@ -129,7 +130,9 @@ def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overr
     stdout_path = runs_dir / ("gradle_%s-%s.stdout" % (gradle_task, stamp))
     stderr_path = runs_dir / ("gradle_%s-%s.stderr" % (gradle_task, stamp))
     env = dict(os.environ)
-    env.update(GRADLE_ENV_DEFAULTS)
+    if not env.get("JAVA_HOME"):
+        fallback = env.get(GRADLE_JAVA_HOME_FALLBACK_ENV)
+        env["JAVA_HOME"] = fallback if fallback else GRADLE_ENV_DEFAULTS["JAVA_HOME"]
     gradle_home = repo_root / ".gradle-user-home"
     gradle_home.mkdir(parents=True, exist_ok=True)
     env["GRADLE_USER_HOME"] = str(gradle_home)

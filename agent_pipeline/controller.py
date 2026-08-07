@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import json
 import os
+import re
 import shutil
 import socket
 import time
@@ -54,8 +55,24 @@ class ControllerError(Exception):
         self.exit_code = exit_code
 
 
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def validate_task_id(task):
+    if not isinstance(task, str) or not TASK_ID_RE.match(task):
+        raise ControllerError("invalid task id: %r" % (task,), EXIT_BAD_INPUT)
+    return task
+
+
 def task_dir_for(task):
-    return TASKS_ROOT / task
+    task = validate_task_id(task)
+    root = TASKS_ROOT.resolve()
+    candidate = (TASKS_ROOT / task).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ControllerError("invalid task id: %r" % (task,), EXIT_BAD_INPUT)
+    return candidate
 
 
 def load_scenarios():
@@ -433,7 +450,7 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
 
 
 def run_stage4_gate_loop(task_dir, state, config, assignments):
-    if "04_gate" in state.get("completed_stages", []):
+    if "04_gate" in state.get("completed_stages", []) and accepted_stage4_gate(task_dir)["accepted"]:
         return EXIT_SUCCESS
     max_passes = int(config.get("max_gate_passes", 2))
     pass_number = len(state.get("stage_gate_passes") or []) + 1
