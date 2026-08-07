@@ -156,6 +156,30 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertIn("02", loaded["completed_stages"])
             self.assertEqual(loaded["agent_call_counts"].get("codex"), 3)
 
+    def test_stage4_gate_loop_short_circuits_once_already_accepted(self):
+        # Regression for the bug where every pipeline-run call re-entered
+        # run_stage4_gate_loop even when Stage 4/04_gate were already
+        # accepted, appending a fresh stage_gate_passes record each time and
+        # eventually exhausting max_gate_passes purely from harmless
+        # re-confirmations (see docs handoff / memory on this bug).
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-gate-already-accepted"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01", "02", "03", "04", "04_gate"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            state = new_state(task, "run-test")
+            reconcile_artifacts(task_dir, state)
+            self.assertIn("04_gate", state["completed_stages"])
+            state["stage_gate_passes"] = [{"pass": 1, "accepted": True}]
+            config = {"max_gate_passes": 2}
+
+            for _ in range(3):
+                code = controller.run_stage4_gate_loop(task_dir, state, config, {})
+                self.assertEqual(code, EXIT_SUCCESS)
+
+            self.assertEqual(len(state["stage_gate_passes"]), 1)
+
     def test_status_prints_active_cross_task_cooldowns(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

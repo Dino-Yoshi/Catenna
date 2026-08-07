@@ -433,6 +433,8 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
 
 
 def run_stage4_gate_loop(task_dir, state, config, assignments):
+    if "04_gate" in state.get("completed_stages", []):
+        return EXIT_SUCCESS
     max_passes = int(config.get("max_gate_passes", 2))
     pass_number = len(state.get("stage_gate_passes") or []) + 1
     force_brief = "04" not in state.get("completed_stages", [])
