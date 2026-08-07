@@ -10,7 +10,7 @@ from pathlib import Path
 from agent_pipeline import controller
 from agent_pipeline import prompts
 from agent_pipeline import usage
-from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS
+from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION
 from agent_pipeline.mock_agent import gate_artifact, valid_artifact
 from agent_pipeline.runner import atomic_finalize
 from agent_pipeline.state import CONTRACTS, load_state, new_state, reconcile_artifacts, state_path, write_state_atomic
@@ -408,6 +408,8 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.with_tasks_root(root)
 
             original = controller.verification.run_verification
+            original_load_config = controller.load_config
+            controller.load_config = lambda: {"verification": {"driven_project_commands": []}}
             controller.verification.run_verification = lambda *args, **kwargs: {
                 "overall_status": "passed",
                 "checks": [{"name": "unit", "status": "passed", "exit_code": 0, "duration_seconds": None}],
@@ -415,11 +417,55 @@ class ControllerReliabilityTests(unittest.TestCase):
                 "report_paths": {"md_path": str(root / "report.md")},
             }
             self.addCleanup(lambda: setattr(controller.verification, "run_verification", original))
+            self.addCleanup(lambda: setattr(controller, "load_config", original_load_config))
 
             code, output = self.capture_verify("verify-none-duration")
 
             self.assertEqual(code, EXIT_SUCCESS)
             self.assertIn("unit: passed (exit=0, 0.0s)", output)
+
+    def test_pipeline_verify_loads_config_and_passes_driven_project_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+            driven_commands = [{"name": "unit", "argv": ["true"]}]
+            seen = {}
+
+            original = controller.verification.run_verification
+            original_load_config = controller.load_config
+            controller.load_config = lambda: {"verification": {"driven_project_commands": driven_commands}}
+
+            def fake_run_verification(*args, **kwargs):
+                seen["driven_project_commands"] = kwargs.get("driven_project_commands")
+                return {
+                    "overall_status": "passed",
+                    "checks": [],
+                    "test_coverage_delta_signal": {"status": "not_checked"},
+                    "report_paths": {"md_path": str(root / "report.md")},
+                }
+
+            controller.verification.run_verification = fake_run_verification
+            self.addCleanup(lambda: setattr(controller.verification, "run_verification", original))
+            self.addCleanup(lambda: setattr(controller, "load_config", original_load_config))
+
+            code, output = self.capture_verify("verify-config")
+
+            self.assertEqual(code, EXIT_SUCCESS, output)
+            self.assertIs(seen["driven_project_commands"], driven_commands)
+
+    def test_pipeline_verify_reports_invalid_config_like_pipeline_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+
+            original_load_config = controller.load_config
+            controller.load_config = lambda: (_ for _ in ()).throw(controller.ConfigError("bad verification"))
+            self.addCleanup(lambda: setattr(controller, "load_config", original_load_config))
+
+            code, output = self.capture_verify("verify-invalid-config")
+
+            self.assertEqual(code, EXIT_VALIDATION)
+            self.assertIn("invalid real-run config: bad verification", output)
 
     def test_status_prints_active_cross_task_cooldowns(self):
         with tempfile.TemporaryDirectory() as tmp:

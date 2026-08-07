@@ -40,6 +40,8 @@ UNIT_TEST_ARGS = ["-m", "unittest", "discover", "-s", "agent_pipeline/tests"]
 MOCK_PIPELINE_ARGS = ["-m", "agent_pipeline.cli", "mock-test"]
 TEST_PATH_MARKERS = ("src/test/", "tests/")
 MANIFEST_VERIFICATION_KEYS = ("unit_tests", "mock_pipeline", "diff_check")
+DRIVEN_PROJECT_DEFAULT_TIMEOUT_SECONDS = 600
+DRIVEN_PROJECT_LAUNCH_FAILURE_EXIT_CODE = 126
 
 _RAN_RE = re.compile(r"Ran (\d+) test")
 _FAILED_COUNTS_RE = re.compile(r"FAILED \(([^)]*)\)")
@@ -155,6 +157,38 @@ def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overr
     }
 
 
+def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None):
+    checks = []
+    for command in driven_project_commands or []:
+        name = command["name"]
+        stamp = run_stamp()
+        stdout_path = runs_dir / ("driven_project_%s-%s.stdout" % (name, stamp))
+        stderr_path = runs_dir / ("driven_project_%s-%s.stderr" % (name, stamp))
+        argv = list(command["argv"])
+        timeout_seconds = command.get("timeout_seconds", DRIVEN_PROJECT_DEFAULT_TIMEOUT_SECONDS)
+        started = time.time()
+        try:
+            exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=repo_root)
+        except OSError as exc:
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path.write_text(str(exc) + "\n", encoding="utf-8")
+            exit_code = DRIVEN_PROJECT_LAUNCH_FAILURE_EXIT_CODE
+            timed_out = False
+        duration = time.time() - started
+        status = "passed" if exit_code == 0 and not timed_out else "failed"
+        checks.append({
+            "name": "driven_project_" + name,
+            "status": status,
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "duration_seconds": duration,
+            "command": argv,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        })
+    return checks
+
+
 def is_test_path(path):
     return any(marker in path for marker in TEST_PATH_MARKERS)
 
@@ -228,7 +262,16 @@ def update_manifest_verification(task_dir, manifest, checks_by_name, coverage_si
     return manifest
 
 
-def run_verification(task_dir, repo_root, run_build=False, unit_test_timeout=600, mock_pipeline_timeout=120, gradle_timeout=1800, allow_pid=None):
+def run_verification(
+    task_dir,
+    repo_root,
+    run_build=False,
+    unit_test_timeout=600,
+    mock_pipeline_timeout=120,
+    gradle_timeout=1800,
+    allow_pid=None,
+    driven_project_commands=None,
+):
     check_concurrency_guard(task_dir, allow_pid=allow_pid)
     runs_dir = verification_runs_dir(task_dir)
 
@@ -239,6 +282,9 @@ def run_verification(task_dir, repo_root, run_build=False, unit_test_timeout=600
     ]
     if run_build:
         checks.append(run_gradle(repo_root, runs_dir, "build", timeout_seconds=gradle_timeout))
+    driven_project_checks = run_driven_project_checks(repo_root, runs_dir, driven_project_commands)
+    checks.extend(driven_project_checks)
+    driven_project_verified = bool(driven_project_checks) and all(check["status"] == "passed" for check in driven_project_checks)
 
     manifest = load_manifest_if_present(task_dir)
     coverage_signal = test_coverage_delta_signal(manifest)
@@ -251,6 +297,7 @@ def run_verification(task_dir, repo_root, run_build=False, unit_test_timeout=600
         "task": task_dir.name,
         "manifest_present": manifest is not None,
         "checks": checks,
+        "driven_project_verified": driven_project_verified,
         "test_coverage_delta_signal": coverage_signal,
         "overall_status": overall_status(checks),
     }
@@ -284,6 +331,7 @@ def render_markdown(report):
         "",
         "Generated: " + report.get("generated_at", ""),
         "Overall status: **%s**" % report.get("overall_status"),
+        "Driven-project verified: **%s**" % str(bool(report.get("driven_project_verified"))).lower(),
         "",
         "## Checks",
         "",

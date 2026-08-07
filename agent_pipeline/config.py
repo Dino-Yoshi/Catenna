@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import json
 import os
+import re
 from pathlib import Path
 
 try:
@@ -13,6 +14,7 @@ except ImportError:  # pragma: no cover - Python 2 compatibility fallback.
 
 
 CONFIG_PATH = Path(".agent-pipeline") / "config" / "orchestrator.json"
+DRIVEN_PROJECT_COMMAND_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 DEFAULT_CONFIG = {
@@ -77,6 +79,7 @@ DEFAULT_CONFIG = {
         "overseer": 10,
     },
     "allow_degraded_same_agent_review": False,
+    "verification": {"driven_project_commands": []},
 }
 
 
@@ -143,6 +146,7 @@ def validate_config(config):
         raise ConfigError("enable_auto_verified must be a boolean")
     if not isinstance(config.get("allow_degraded_same_agent_review"), bool):
         raise ConfigError("allow_degraded_same_agent_review must be a boolean")
+    validate_verification_config(config)
     timeout_seconds = config.get("timeout_seconds")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
         raise ConfigError("timeout_seconds must be a positive integer")
@@ -153,6 +157,33 @@ def validate_config(config):
         if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
             raise ConfigError("turn_budgets.%s must be a positive integer" % stage)
     return True
+
+
+def validate_verification_config(config):
+    verification = config.get("verification", {})
+    if not isinstance(verification, Mapping):
+        raise ConfigError("verification must be a mapping")
+    commands = verification.get("driven_project_commands", [])
+    if not isinstance(commands, list):
+        raise ConfigError("verification.driven_project_commands must be a list")
+    names = set()
+    for index, command in enumerate(commands):
+        prefix = "verification.driven_project_commands[%d]" % index
+        if not isinstance(command, Mapping):
+            raise ConfigError(prefix + " must be a mapping")
+        name = command.get("name")
+        if not isinstance(name, str) or not name or not DRIVEN_PROJECT_COMMAND_NAME_RE.match(name):
+            raise ConfigError(prefix + ".name must be a non-empty string matching ^[A-Za-z0-9_.-]+$")
+        if name in names:
+            raise ConfigError("verification.driven_project_commands name is duplicated: " + name)
+        names.add(name)
+        argv = command.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+            raise ConfigError(prefix + ".argv must be a non-empty list of strings")
+        if "timeout_seconds" in command:
+            timeout = command.get("timeout_seconds")
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+                raise ConfigError(prefix + ".timeout_seconds must be a positive integer")
 
 
 def validate_role_agent_references(config):

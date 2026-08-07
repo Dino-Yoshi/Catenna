@@ -200,7 +200,17 @@ def pipeline_brief(task, stage=None, run_id=None):
 def pipeline_verify(task, run_build=False):
     task_dir = task_dir_for(task)
     try:
-        report = verification.run_verification(task_dir, REPO_ROOT, run_build=run_build)
+        config = load_config()
+    except ConfigError as exc:
+        print("invalid real-run config: %s" % exc)
+        return EXIT_VALIDATION
+    try:
+        report = verification.run_verification(
+            task_dir,
+            REPO_ROOT,
+            run_build=run_build,
+            driven_project_commands=config.get("verification", {}).get("driven_project_commands", []),
+        )
     except verification.VerificationError as exc:
         print(str(exc))
         return EXIT_LOCKED
@@ -435,7 +445,12 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
 
         verification_report = None
         try:
-            verification_report = verification.run_verification(task_dir, REPO_ROOT, allow_pid=os.getpid())
+            verification_report = verification.run_verification(
+                task_dir,
+                REPO_ROOT,
+                allow_pid=os.getpid(),
+                driven_project_commands=config.get("verification", {}).get("driven_project_commands", []),
+            )
         except verification.VerificationError as exc:
             append_log(task_dir, {"event": "verification_error", "stage": "05", "reason": str(exc), "run_id": state.get("run_id")})
 
@@ -973,6 +988,7 @@ def run_overseer_or_fallback(task_dir, state, config, manifest, assignments, ver
         config.get("enable_auto_verified", True)
         and verification_report is not None
         and verification_report.get("overall_status") == "passed"
+        and verification_report.get("driven_project_verified") is True
         and (verification_report.get("test_coverage_delta_signal") or {}).get("status") != "flagged"
     )
     if auto_verified_eligible and handoff.get("route") not in ("blocked", "administrator_action"):

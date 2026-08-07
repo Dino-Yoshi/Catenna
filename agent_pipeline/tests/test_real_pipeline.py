@@ -45,13 +45,16 @@ class RealPipelineTests(unittest.TestCase):
         controller.verification.run_verification = self.original_run_verification
         self.tmp.cleanup()
 
-    def verification_report(self, overall_status="incomplete", coverage_status="no_data"):
-        return {
+    def verification_report(self, overall_status="incomplete", coverage_status="no_data", driven_project_verified=None):
+        report = {
             "schema_version": 1,
             "overall_status": overall_status,
             "checks": [{"name": "unit_tests", "status": "passed" if overall_status == "passed" else "not_attempted"}],
             "test_coverage_delta_signal": {"status": coverage_status},
         }
+        if driven_project_verified is not None:
+            report["driven_project_verified"] = driven_project_verified
+        return report
 
     def config(self, gate_ready=True, max_gate_passes=2):
         return {
@@ -79,6 +82,7 @@ class RealPipelineTests(unittest.TestCase):
             },
             "turn_budgets": {"02": 5, "03": 5, "04": 5, "04_gate": 5, "05": 5, "07": 5, "overseer": 5},
             "gate_ready": gate_ready,
+            "verification": {"driven_project_commands": []},
         }
 
     def write_fake_agent(self):
@@ -343,28 +347,38 @@ class RealPipelineTests(unittest.TestCase):
         self.assertFalse((self.task_dir / CONTRACTS["06"].filename).exists())
 
     def test_failed_or_flagged_evidence_does_not_trigger_auto_verified(self):
-        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="failed")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="failed", driven_project_verified=True)
         code = controller.pipeline_run(self.task, allow_dirty=True)
         self.assertEqual(code, EXIT_BLOCKED)
         self.assertEqual(load_state(self.task_dir, self.task)["state"], "awaiting_human_test")
 
         self.setUp_for_second_task()
-        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="flagged")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="flagged", driven_project_verified=True)
         code = controller.pipeline_run(self.task, allow_dirty=True)
         self.assertEqual(code, EXIT_BLOCKED)
         self.assertEqual(load_state(self.task_dir, self.task)["state"], "awaiting_human_test")
 
-    def setUp_for_second_task(self):
+        self.setUp_for_second_task("real-fixture-3")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="ok")
+        code = controller.pipeline_run(self.task, allow_dirty=True)
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertEqual(load_state(self.task_dir, self.task)["state"], "awaiting_human_test")
+
+    def setUp_for_second_task(self, task="real-fixture-2"):
         # Reset just enough state to run pipeline_run again from scratch
         # against a fresh task directory within the same test method.
-        self.task = "real-fixture-2"
+        self.task = task
         self.task_dir = self.root / self.task
         self.task_dir.mkdir(parents=True)
         (self.task_dir / CONTRACTS["00"].filename).write_text(valid_artifact("00"), encoding="utf-8")
         (self.task_dir / CONTRACTS["01"].filename).write_text(valid_artifact("01"), encoding="utf-8")
 
     def test_auto_verified_path_drives_stage_06_through_08_in_one_call(self):
-        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="ok")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(
+            overall_status="passed",
+            coverage_status="ok",
+            driven_project_verified=True,
+        )
 
         code = controller.pipeline_run(self.task, allow_dirty=True)
 
@@ -420,7 +434,11 @@ class RealPipelineTests(unittest.TestCase):
         self.assertIn("diff review verdict (needs_followup)", stage08)
 
     def test_resumed_pipeline_run_on_complete_task_is_a_pure_noop(self):
-        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="ok")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(
+            overall_status="passed",
+            coverage_status="ok",
+            driven_project_verified=True,
+        )
         controller.pipeline_run(self.task, allow_dirty=True)
         count_path = self.root / "counts.txt"
         os.environ["FAKE_COUNT_PATH"] = str(count_path)

@@ -88,6 +88,51 @@ class ReasoningCaptureConfigTests(unittest.TestCase):
         del cfg["turn_budgets"]["05"]
         self.assertTrue(config.validate_config(cfg))
 
+    def test_default_verification_config_has_no_driven_project_commands(self):
+        self.assertEqual(config.DEFAULT_CONFIG["verification"]["driven_project_commands"], [])
+
+    def test_valid_driven_project_commands_are_accepted(self):
+        cfg = config.deep_copy(config.DEFAULT_CONFIG)
+        cfg["verification"]["driven_project_commands"] = [
+            {"name": "pytest.unit", "argv": ["python3", "-m", "pytest"], "timeout_seconds": 30},
+            {"name": "build-1", "argv": ["./gradlew", "build"]},
+        ]
+        self.assertTrue(config.validate_config(cfg))
+
+    def test_invalid_driven_project_command_names_are_rejected(self):
+        for name in ("", "has space", "../x", "x/y"):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad["verification"]["driven_project_commands"] = [{"name": name, "argv": ["true"]}]
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("name", str(raised.exception))
+
+    def test_duplicate_driven_project_command_names_are_rejected(self):
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["verification"]["driven_project_commands"] = [
+            {"name": "unit", "argv": ["true"]},
+            {"name": "unit", "argv": ["true"]},
+        ]
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("duplicated", str(raised.exception))
+
+    def test_driven_project_command_argv_must_be_non_empty_string_list(self):
+        for argv in ([], "true", [1], ["true", 2]):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad["verification"]["driven_project_commands"] = [{"name": "unit", "argv": argv}]
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("argv", str(raised.exception))
+
+    def test_driven_project_command_timeout_must_be_positive_integer_not_bool(self):
+        for timeout in (True, "30", 0, -1):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad["verification"]["driven_project_commands"] = [{"name": "unit", "argv": ["true"], "timeout_seconds": timeout}]
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("timeout_seconds", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
