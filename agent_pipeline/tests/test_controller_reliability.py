@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from agent_pipeline import controller
+from agent_pipeline import prompts
 from agent_pipeline import usage
 from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS
 from agent_pipeline.mock_agent import gate_artifact, valid_artifact
@@ -35,6 +36,12 @@ class ControllerReliabilityTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             code = controller.status(task)
+        return code, output.getvalue()
+
+    def capture_verify(self, task):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = controller.pipeline_verify(task)
         return code, output.getvalue()
 
     def test_task_dir_for_accepts_safe_task_ids(self):
@@ -227,6 +234,81 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(state["completed_stages"], ["00", "01", "02", "03", "04"])
             self.assertEqual(len(state["stage_gate_passes"]), 1)
             self.assertFalse(state["stage_gate_passes"][0]["accepted"])
+
+    def test_stage4_gate_loop_archives_brief_before_identical_revision_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-archive-identical"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01", "02", "03"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            state = new_state(task, "run-test")
+            calls = {"04_gate": 0}
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False):
+                if stage_key == "04":
+                    (task_dir_arg / CONTRACTS["04"].filename).write_text(valid_artifact("04"), encoding="utf-8")
+                    if "04" not in state_arg["completed_stages"]:
+                        state_arg["completed_stages"].append("04")
+                    return EXIT_SUCCESS
+                if stage_key == "04_gate":
+                    calls["04_gate"] += 1
+                    (task_dir_arg / CONTRACTS["04_gate"].filename).write_text(
+                        gate_artifact(
+                            "04_gate",
+                            "ready_for_implementation: false\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []",
+                        ),
+                        encoding="utf-8",
+                    )
+                    if "04_gate" not in state_arg["completed_stages"]:
+                        state_arg["completed_stages"].append("04_gate")
+                    return EXIT_SUCCESS
+                return EXIT_SUCCESS
+
+            original = controller.ensure_real_stage
+            controller.ensure_real_stage = fake_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original))
+
+            code = controller.run_stage4_gate_loop(task_dir, state, {"max_gate_passes": 2}, {})
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(calls["04_gate"], 1)
+            self.assertTrue((task_dir / "04_final_codex_brief.pass-1.md").exists())
+            self.assertTrue((task_dir / "04_final_codex_brief.pass-2.md").exists())
+            self.assertTrue((task_dir / "04_final_brief_audit.pass-1.md").exists())
+            self.assertFalse((task_dir / "04_final_brief_audit.pass-2.md").exists())
+
+    def test_stage4_prompt_uses_contract_section_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text = prompts.prompt_text(Path(tmp) / "task", "task", "04")
+        for section in CONTRACTS["04"].sections:
+            self.assertIn("## " + section, text)
+        # The extra sections beyond the contract's required 6 are kept as
+        # explicitly optional guidance, not silently dropped (round-2 Stage
+        # 7 review caught the earlier version of this fix regressing brief
+        # quality by dropping them entirely).
+        for section in ("Verification commands", "Stop conditions"):
+            self.assertIn("## " + section, text)
+        self.assertIn("not structurally required", text)
+
+    def test_pipeline_verify_treats_none_duration_as_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+
+            original = controller.verification.run_verification
+            controller.verification.run_verification = lambda *args, **kwargs: {
+                "overall_status": "passed",
+                "checks": [{"name": "unit", "status": "passed", "exit_code": 0, "duration_seconds": None}],
+                "test_coverage_delta_signal": {"status": "not_checked"},
+                "report_paths": {"md_path": str(root / "report.md")},
+            }
+            self.addCleanup(lambda: setattr(controller.verification, "run_verification", original))
+
+            code, output = self.capture_verify("verify-none-duration")
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertIn("unit: passed (exit=0, 0.0s)", output)
 
     def test_status_prints_active_cross_task_cooldowns(self):
         with tempfile.TemporaryDirectory() as tmp:

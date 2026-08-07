@@ -12,6 +12,17 @@ from pathlib import Path
 from . import stream_events
 from . import usage as usage_module
 from .config import agent_config
+from .failures import (
+    FAILURE_CLASS_MAX_TURNS,
+    FAILURE_CLASS_PERMISSION_ERROR,
+    FAILURE_CLASS_PROCESS_INTERRUPTED,
+    FAILURE_CLASS_RATE_LIMIT,
+    FAILURE_CLASS_SANDBOX_ENVIRONMENT,
+    FAILURE_CLASS_SOURCE_FAILURE,
+    FAILURE_CLASS_TIMEOUT,
+    FAILURE_CLASS_UNKNOWN_FAILURE,
+    FAILURE_CLASS_USAGE_LIMIT,
+)
 from .state import orchestrator_dir
 
 
@@ -56,7 +67,12 @@ def invoke_agent(
     exit_code = None
     failure_class = None
     partial = False
-    real_process_invoked = True
+    real_process_invoked = False
+
+    def mark_launched():
+        nonlocal real_process_invoked
+        real_process_invoked = True
+
     try:
         argv, metadata_argv = build_argv(agent, detail, execution_mode, prompt_path, candidate_path, config, stage_key)
         if not command_available(argv[0]):
@@ -69,32 +85,34 @@ def invoke_agent(
             stderr_path,
             int(config.get("timeout_seconds", 3600)),
             stdin_text=stdin_text,
+            on_launch=mark_launched,
         )
         if timed_out:
-            failure_class = "timeout"
+            failure_class = FAILURE_CLASS_TIMEOUT
     except RealRunnerError as exc:
         stdout_path.write_text("", encoding="utf-8")
         stderr_path.write_text(str(exc) + "\n", encoding="utf-8")
         exit_code = 127
-        failure_class = "source_failure"
+        failure_class = FAILURE_CLASS_SOURCE_FAILURE
     except OSError as exc:
         stdout_path.write_text("", encoding="utf-8")
         stderr_path.write_text(str(exc) + "\n", encoding="utf-8")
         exit_code = 126
-        failure_class = "permission_error"
+        failure_class = FAILURE_CLASS_PERMISSION_ERROR
 
     ended = now()
     duration = time.time() - started_monotonic
     stdout_text = safe_read(stdout_path)
     stderr_text = safe_read(stderr_path)
+    events = stream_events.parse_json_lines(stdout_text)
     if failure_class is None:
-        failure_class = classify(exit_code, stdout_text, stderr_text, agent)
-    if failure_class in ("max_turns", "process_interrupted", "timeout"):
+        failure_class = classify(exit_code, stdout_text, stderr_text, agent, events=events)
+    if failure_class in (FAILURE_CLASS_MAX_TURNS, FAILURE_CLASS_PROCESS_INTERRUPTED, FAILURE_CLASS_TIMEOUT):
         partial = True
 
-    extracted_path = extract_candidate(candidate_path, stdout_text, agent)
-    usage_data = stream_events.usage_summary(agent, stdout_text)
-    reasoning_text = stream_events.reasoning_summary(agent, stdout_text)
+    extracted_path = extract_candidate(candidate_path, stdout_text, agent, events=events)
+    usage_data = stream_events.usage_summary(agent, stdout_text, events=events)
+    reasoning_text = stream_events.reasoning_summary(agent, stdout_text, events=events)
     reasoning_path = None
     if reasoning_text and capture_reasoning:
         reasoning_path = runs_dir / (base + ".reasoning.md")
@@ -136,7 +154,7 @@ def invoke_agent(
     return result
 
 
-def run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, cwd=None, env=None):
+def run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, cwd=None, env=None, on_launch=None):
     """Run argv to completion, writing stdout/stderr to files as they're
     produced. Shared by invoke_agent (agent CLIs) and verification.py
     (gradle/unittest) so there's one subprocess-invocation pattern, not a
@@ -152,6 +170,8 @@ def run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=Non
                 cwd=str(cwd) if cwd is not None else None,
                 env=env,
             )
+            if on_launch is not None:
+                on_launch()
             try:
                 process.communicate(
                     stdin_text.encode("utf-8") if stdin_text is not None else None,
@@ -254,35 +274,35 @@ def command_available(command):
     return shutil.which(command) is not None
 
 
-def classify(exit_code, stdout_text, stderr_text, agent=None):
+def classify(exit_code, stdout_text, stderr_text, agent=None, events=None):
     if exit_code == 0:
         return None
-    structured = stream_events.structured_failure(agent, stdout_text)
+    structured = stream_events.structured_failure(agent, stdout_text, events=events)
     if structured:
         return structured
     combined = (stdout_text + "\n" + stderr_text).lower()
     if exit_code in (130, -2):
-        return "process_interrupted"
+        return FAILURE_CLASS_PROCESS_INTERRUPTED
     if "max turns" in combined or "maximum turns" in combined or "turn limit" in combined:
-        return "max_turns"
+        return FAILURE_CLASS_MAX_TURNS
     if "usage limit" in combined or "quota" in combined or "billing" in combined:
-        return "usage_limit"
+        return FAILURE_CLASS_USAGE_LIMIT
     if "rate limit" in combined or "too many requests" in combined:
-        return "rate_limit"
+        return FAILURE_CLASS_RATE_LIMIT
     if "permission" in combined or "denied" in combined:
-        return "permission_error"
+        return FAILURE_CLASS_PERMISSION_ERROR
     if "sandbox" in combined:
-        return "sandbox_environment"
+        return FAILURE_CLASS_SANDBOX_ENVIRONMENT
     if exit_code == -1:
-        return "timeout"
-    return "unknown_failure"
+        return FAILURE_CLASS_TIMEOUT
+    return FAILURE_CLASS_UNKNOWN_FAILURE
 
 
-def extract_candidate(configured_path, stdout_text, agent=None):
+def extract_candidate(configured_path, stdout_text, agent=None, events=None):
     configured_path = Path(configured_path)
     if configured_path.exists() and configured_path.stat().st_size > 0:
         return configured_path
-    text = stream_events.final_text(agent, stdout_text)
+    text = stream_events.final_text(agent, stdout_text, events=events)
     configured_path.write_text(text if text is not None else stdout_text, encoding="utf-8")
     return configured_path
 

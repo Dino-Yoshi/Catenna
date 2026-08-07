@@ -3,8 +3,10 @@ from __future__ import print_function
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from agent_pipeline.real_runner import build_argv, classify, extract_candidate
+from agent_pipeline import real_runner
+from agent_pipeline.real_runner import build_argv, classify, extract_candidate, run_to_files
 
 
 class BuildArgvCodexTests(unittest.TestCase):
@@ -163,6 +165,42 @@ class ClassifyTests(unittest.TestCase):
     def test_structured_claude_failure_takes_priority_over_substrings(self):
         stdout = '{"type":"result","subtype":"error_max_turns","is_error":true}'
         self.assertEqual(classify(1, stdout, "", agent="claude"), "max_turns")
+
+    def test_classify_uses_supplied_events(self):
+        events = [{"type": "result", "subtype": "error_max_turns", "is_error": True}]
+        self.assertEqual(classify(1, "not json", "", agent="claude", events=events), "max_turns")
+
+
+class RunToFilesTests(unittest.TestCase):
+    def test_on_launch_runs_after_popen_returns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launched = []
+            code, timed_out = run_to_files(
+                ["python3", "-c", "print('ok')"],
+                root / "stdout.txt",
+                root / "stderr.txt",
+                30,
+                on_launch=lambda: launched.append(True),
+            )
+            self.assertEqual(code, 0)
+            self.assertFalse(timed_out)
+            self.assertEqual(launched, [True])
+
+    def test_on_launch_not_called_when_popen_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launched = []
+            with mock.patch.object(real_runner.subprocess, "Popen", side_effect=OSError("boom")):
+                with self.assertRaises(OSError):
+                    run_to_files(
+                        ["python3", "-c", "print('ok')"],
+                        root / "stdout.txt",
+                        root / "stderr.txt",
+                        30,
+                        on_launch=lambda: launched.append(True),
+                    )
+            self.assertEqual(launched, [])
 
 
 class ExtractCandidateTests(unittest.TestCase):

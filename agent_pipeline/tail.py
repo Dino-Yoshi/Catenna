@@ -135,7 +135,10 @@ def brief(task_dir, stage=None, run_id=None, print_fn=print):
     print_fn("agent: %s" % (agent or "unknown"))
     if metadata:
         print_fn("stage: %s" % metadata.get("stage"))
-        print_fn("duration: %.1fs" % metadata.get("duration_seconds", 0.0))
+        duration_seconds = metadata.get("duration_seconds")
+        if duration_seconds is None:
+            duration_seconds = 0.0
+        print_fn("duration: %.1fs" % duration_seconds)
         print_fn("exit_code: %s" % metadata.get("exit_code"))
         print_fn("failure_class: %s" % (metadata.get("failure_class") or "none"))
         if metadata.get("usage"):

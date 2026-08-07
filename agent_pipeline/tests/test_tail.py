@@ -82,6 +82,19 @@ class TailTests(unittest.TestCase):
         self.assertIn("final text here", joined)
         self.assertIn("failure_class: none", joined)
 
+    def test_brief_treats_none_duration_as_zero(self):
+        stdout_path = self.runs_dir / "04-pass-1-attempt-1-claude-run-none.stdout"
+        stdout_path.write_text("\n".join(CLAUDE_LINES) + "\n", encoding="utf-8")
+        metadata_path = self.runs_dir / "04-pass-1-attempt-1-claude-run-none.json"
+        metadata_path.write_text(
+            json.dumps({"stage": "04", "duration_seconds": None, "exit_code": 0, "failure_class": None}),
+            encoding="utf-8",
+        )
+        lines = []
+        result = tail.brief(self.task_dir, print_fn=lines.append)
+        self.assertEqual(result, "ok")
+        self.assertIn("duration: 0.0s", "\n".join(lines))
+
     def test_brief_reports_usage_when_present_in_metadata_sidecar(self):
         stdout_path = self.runs_dir / "04-pass-1-attempt-1-claude-run-a.stdout"
         stdout_path.write_text("\n".join(CLAUDE_LINES) + "\n", encoding="utf-8")
