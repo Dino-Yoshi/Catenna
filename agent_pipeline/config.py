@@ -15,9 +15,7 @@ DEFAULT_CONFIG = {
     "default_safety_mode": "strict",
     "supported_safety_modes": ["strict", "continuity"],
     "stage_attempt_budget": 2,
-    "temporary_full_retry_budget": 1,
     "max_gate_passes": 2,
-    "hard_max_gate_passes": 3,
     "timeout_seconds": 3600,
     "roles": {
         "02": {"primary": "codex", "fallbacks": ["claude", "agy"]},
@@ -112,11 +110,9 @@ def validate_config(config):
         raise ConfigError("unsupported orchestrator config schema_version")
     if config.get("default_safety_mode") not in config.get("supported_safety_modes", []):
         raise ConfigError("default_safety_mode is not supported")
-    for key in ("max_gate_passes", "hard_max_gate_passes", "stage_attempt_budget", "temporary_full_retry_budget"):
+    for key in ("max_gate_passes", "stage_attempt_budget"):
         if not isinstance(config.get(key), int) or int(config.get(key)) < 1:
             raise ConfigError(key + " must be a positive integer")
-    if int(config["max_gate_passes"]) > int(config["hard_max_gate_passes"]):
-        raise ConfigError("max_gate_passes cannot exceed hard_max_gate_passes")
     for stage in ("02", "03", "04", "04_gate", "05", "07", "overseer"):
         if stage not in config.get("roles", {}):
             raise ConfigError("missing role config for " + stage)
