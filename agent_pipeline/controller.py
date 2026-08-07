@@ -299,7 +299,6 @@ def approve_retry(task, approval_id):
                 return EXIT_BAD_INPUT
             pending["approved"] = True
             pending["approved_at"] = now()
-            state["state"] = "ready"
             append_log(task_dir, {"event": "approval_granted", "approval_id": approval_id, "run_id": run_id})
             write_state_atomic(task_dir, state)
             print("approval granted: %s" % approval_id)
@@ -550,8 +549,27 @@ def run_stage4_gate_loop(task_dir, state, config, assignments):
 
 
 def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assignments, pass_number=1, force=False):
-    if not force and stage_key in state.get("completed_stages", []):
-        return EXIT_SUCCESS
+    pending = state.get("pending_approval") or {}
+    awaiting_retry_approval = state.get("state") == "awaiting_retry_approval"
+    completed = stage_key in state.get("completed_stages", [])
+    if not awaiting_retry_approval:
+        if not force and completed:
+            return EXIT_SUCCESS
+    elif pending.get("stage") != stage_key:
+        if completed and not force:
+            return EXIT_SUCCESS
+        return EXIT_BLOCKED
+    else:
+        if not pending.get("approved") or pending.get("consumed"):
+            return EXIT_BLOCKED
+        if completed:
+            consume_approved_retry_if_present(state, stage_key)
+            append_log(task_dir, {"event": "approval_consumed", "stage": stage_key, "run_id": state.get("run_id")})
+            state["pending_approval"] = None
+            return EXIT_SUCCESS
+        consume_approved_retry_if_present(state, stage_key)
+        append_log(task_dir, {"event": "approval_consumed", "stage": stage_key, "run_id": state.get("run_id")})
+        state["state"] = "running"
     attempt_budget = int(config.get("stage_attempt_budget", 2))
     attempts = 0
     next_attempt_kind = "normal"
@@ -601,6 +619,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
                 result["dirty_baseline"] = state.get("dirty_baseline")
             assignments[stage_key] = agent
             state.setdefault("stage_agents", {})[stage_key] = agent
+            clear_same_stage_pending_approval(state, stage_key)
             append_log(task_dir, {"event": "artifact_finalization", "stage": stage_key, "pass": pass_number, "attempt": attempt_number, "provider": agent, "artifact_hash": result.get("final_artifact_hash"), "run_id": state.get("run_id")})
             return EXIT_SUCCESS
         failure_class = result.get("failure_class") or final["validation"].get("failure_class")
@@ -614,6 +633,10 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             next_attempt_kind = "provider_fallback"
             next_retry_reason = "provider fallback"
             continue
+        human_approved_retry_key = stage_key + "_human_approved_retry"
+        if failure_class == FAILURE_CLASS_MAX_TURNS and state["attempts"].get(human_approved_retry_key):
+            block_transition(task_dir, state, stage_key, "real stage failed: " + failure_class, failure_class)
+            return EXIT_BLOCKED
         if failure_class == FAILURE_CLASS_MAX_TURNS and useful_partial(output, CONTRACTS[stage_key]) and not state["attempts"].get(stage_key + "_completion_retry"):
             state["attempts"][stage_key + "_completion_retry"] = 1
             completion_attempt = increment_attempt(state, stage_key)
@@ -632,8 +655,36 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
                     completion["dirty_baseline"] = state.get("dirty_baseline")
                 assignments[stage_key] = agent
                 state.setdefault("stage_agents", {})[stage_key] = agent
+                clear_same_stage_pending_approval(state, stage_key)
                 append_log(task_dir, {"event": "artifact_finalization", "stage": stage_key, "pass": pass_number, "attempt": completion_attempt, "provider": agent, "artifact_hash": completion.get("final_artifact_hash"), "run_id": state.get("run_id")})
                 return EXIT_SUCCESS
+            state["attempts"][human_approved_retry_key] = 1
+            require_retry_approval(
+                state,
+                stage_key,
+                failure_class,
+                agent,
+                "max-turn completion retry did not finalize",
+                retry_type="human_approved_full_stage_retry",
+                failed_attempt_metadata_path=result.get("metadata_path"),
+                failed_attempt_number=result.get("attempt_number"),
+                completion_retry_metadata_path=completion.get("metadata_path"),
+                completion_retry_attempt_number=completion.get("attempt_number"),
+            )
+            return EXIT_BLOCKED
+        if failure_class == FAILURE_CLASS_MAX_TURNS:
+            state["attempts"][human_approved_retry_key] = 1
+            require_retry_approval(
+                state,
+                stage_key,
+                failure_class,
+                agent,
+                "unusable max-turn output",
+                retry_type="human_approved_full_stage_retry",
+                failed_attempt_metadata_path=result.get("metadata_path"),
+                failed_attempt_number=result.get("attempt_number"),
+            )
+            return EXIT_BLOCKED
         if failure_class in (FAILURE_CLASS_MALFORMED_ARTIFACT, FAILURE_CLASS_EMPTY_OUTPUT, FAILURE_CLASS_TIMEOUT) and attempts < attempt_budget:
             next_attempt_kind = "transient_retry"
             next_retry_reason = "transient timeout" if failure_class == FAILURE_CLASS_TIMEOUT else "malformed output"
@@ -1273,19 +1324,39 @@ def handle_failure(task_dir, state, scenario, mock, stage_key, agent, attempt, f
     return EXIT_BLOCKED
 
 
-def require_retry_approval(state, stage_key, failure_class, agent, reason):
+def require_retry_approval(
+    state,
+    stage_key,
+    failure_class,
+    agent,
+    reason,
+    retry_type="temporary_full_retry",
+    failed_attempt_metadata_path=None,
+    failed_attempt_number=None,
+    completion_retry_metadata_path=None,
+    completion_retry_attempt_number=None,
+):
     state["state"] = "awaiting_retry_approval"
-    state["pending_approval"] = {
+    pending = {
         "approval_id": "retry-" + uuid.uuid4().hex[:12],
         "stage": stage_key,
         "failure_class": failure_class,
-        "retry_type": "temporary_full_retry",
+        "retry_type": retry_type,
         "agent": agent,
         "created_at": now(),
         "reason": reason,
         "approved": False,
         "consumed": False,
     }
+    for key, value in (
+        ("failed_attempt_metadata_path", failed_attempt_metadata_path),
+        ("failed_attempt_number", failed_attempt_number),
+        ("completion_retry_metadata_path", completion_retry_metadata_path),
+        ("completion_retry_attempt_number", completion_retry_attempt_number),
+    ):
+        if value is not None:
+            pending[key] = value
+    state["pending_approval"] = pending
     state["last_failure"] = failure_record(stage_key, failure_class, reason)
 
 
@@ -1296,6 +1367,12 @@ def consume_approved_retry_if_present(state, stage_key):
         pending["consumed_at"] = now()
         return True
     return False
+
+
+def clear_same_stage_pending_approval(state, stage_key):
+    pending = state.get("pending_approval")
+    if pending and pending.get("stage") == stage_key:
+        state["pending_approval"] = None
 
 
 def block(state, stage_key, reason, failure_class):
