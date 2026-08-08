@@ -2,19 +2,43 @@ from __future__ import print_function
 
 import io
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 from agent_pipeline import cli
 from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_SUCCESS
 
 
 class CliParserTests(unittest.TestCase):
-    def test_parser_prog_uses_current_module_path(self):
+    def patch_argv0(self, argv0):
+        original = cli.sys.argv
+        cli.sys.argv = [argv0]
+        self.addCleanup(lambda: setattr(cli.sys, "argv", original))
+
+    def test_parser_prog_uses_module_form_by_default(self):
+        self.patch_argv0("/usr/bin/python3")
         parser = cli.build_parser()
         help_text = parser.format_help()
 
         self.assertNotIn("tools.agent_pipeline.cli", help_text)
         self.assertIn("python3 -m agent_pipeline.cli", help_text)
+
+    def test_parser_prog_uses_catenna_for_console_script(self):
+        self.patch_argv0("/usr/local/bin/catenna")
+        parser = cli.build_parser()
+
+        self.assertIn("usage: catenna", parser.format_help())
+
+    def test_help_for_command_uses_console_script_prog(self):
+        self.patch_argv0("/usr/local/bin/catenna")
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            code = cli.print_help_for(parser, sub, "verify")
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertIn("usage: catenna verify", output.getvalue())
 
     def test_task_is_positional_and_optional_on_renamed_command(self):
         parser = cli.build_parser()
@@ -31,6 +55,32 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.command, "run")
         self.assertEqual(args.task, "some-task")
         self.assertTrue(args.allow_dirty)
+
+    def test_run_background_parses(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["run", "some-task", "--background"])
+
+        self.assertEqual(args.command, "run")
+        self.assertEqual(args.task, "some-task")
+        self.assertTrue(args.background)
+
+    def test_verify_background_parses(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["verify", "some-task", "--background"])
+
+        self.assertEqual(args.command, "verify")
+        self.assertEqual(args.task, "some-task")
+        self.assertTrue(args.background)
+
+    def test_background_is_only_on_run_and_verify(self):
+        parser = cli.build_parser()
+        err = io.StringIO()
+
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["status", "some-task", "--background"])
 
     def test_use_select_set_are_aliases_of_one_parser(self):
         parser = cli.build_parser()

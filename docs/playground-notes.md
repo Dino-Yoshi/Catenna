@@ -15,6 +15,9 @@ bypass is the `--allow-dirty` CLI flag already wired up in `cli.py`. A
 user who does what the message says gets no effect and stays blocked with
 no explanation.
 
+Fixed 2026-08-08: the live Stage 5 dirty-worktree block now names
+`--allow-dirty`.
+
 ## 2026-08-08: `catenna run`/`catenna verify` block the terminal for the whole call
 
 Both commands drive every stage synchronously and in-process —
@@ -29,6 +32,9 @@ all today. Core complaint: a single-terminal workflow has no way to kick
 either off and then do anything else, including check on it, until it
 finishes.
 
+Fixed 2026-08-08: `run` and `verify` now accept `--background` and write
+detached output to per-task `.orchestrator/background_*.log` files.
+
 ## 2026-08-08: `catenna --help` shows the wrong usage line for how it was actually invoked
 
 `build_parser()` hardcodes `prog="python3 -m agent_pipeline.cli"`
@@ -38,3 +44,6 @@ subcommand's `--help`, and `catenna help [command]`, which shares the
 same parser) prints `usage: python3 -m agent_pipeline.cli ...` even when
 invoked as `catenna`. Argparse error messages use the same `prog` and are
 equally affected.
+
+Fixed 2026-08-08: help/usage shows `catenna` for the console script and
+keeps `python3 -m agent_pipeline.cli` for module-form invocation.
