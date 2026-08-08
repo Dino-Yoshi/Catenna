@@ -1,25 +1,46 @@
-# Agent pipeline overview
+# Catenna overview
 
-Living document for `agent_pipeline/` (the Python orchestrator) and how it
-relates to the legacy bash pipeline (`Makefile`/`Makefile.legacy`) that still
-lives in each driven project's repo. Updated at the end of every phase of the
-redesign tracked in [PHASES.md](PHASES.md).
+Living document for `agent_pipeline/` — "Catenna", the Python orchestrator —
+and how it relates to the legacy bash pipeline (`Makefile`/`Makefile.legacy`)
+that lives in each *driven project*'s own repo. This repo is Catenna's
+standalone home and contains no Makefile of its own; invoke it directly as
+`python3 -m agent_pipeline.cli <command> --task ...` (see "Command table"
+below).
 
-This snapshot reflects the system through the end of Phase 5 of the
-redesign.
+This snapshot reflects the system through Phase 5 of the original redesign
+(history below) plus the post-extraction hardening pass that has followed
+on branch `v1-fixes`/`v1-cleanup` (see "Post-Phase-5 hardening" below and
+the Changelog at the bottom). 306 tests, all green:
+`python3 -m unittest discover -s agent_pipeline/tests`.
 
 **Relocation note (2026-08-05):** Phases 0-5 below were built and tested
 while this code lived at `tools/agent_pipeline/` (and docs at
 `docs/agent-pipeline/`) inside a driven project's own repo
 (`immersive-enchanting-1122`), gitignored there the whole time. It has since
 been extracted to this standalone repo so it can drive multiple projects.
-Path references below that predate this note (`tools/agent_pipeline/...`,
-`docs/agent-pipeline/...`) describe that original in-repo layout; the
-current layout is `agent_pipeline/...` / `docs/...` here, with each driven
-project keeping only `Makefile.orchestrator` (pointed at
-`AGENT_PIPELINE_HOME`) plus its own `.agent-pipeline/` task data. See this
-repo's own commit history from here forward for what's current; treat
-everything below as a historical record of Phases 0-5, not a live snapshot.
+Path references inside the dated Phase 0-5 narrative below
+(`tools/agent_pipeline/...`, `docs/agent-pipeline/...`) describe that
+original in-repo layout and are kept as historical record; the current
+layout is `agent_pipeline/...` / `docs/...` here, with each driven project
+keeping only its own `Makefile.orchestrator` (pointed at this repo, e.g. via
+an `AGENT_PIPELINE_HOME` env var) plus its own `.agent-pipeline/` task data.
+Everything in this document *outside* the dated changelog entries (state
+machine, module list, command table, known gaps) has been kept updated to
+match current code — see git log for exactly what changed and when.
+
+**Post-Phase-5 hardening (2026-08-06 to 2026-08-07):** Catenna now
+self-hosts on its own repo (`.agent-pipeline/` here is real but gitignored,
+per commit `13bb326`), and several rounds of audit-driven fixes have run
+through Catenna's own real pipeline instead of by hand — task-id
+validation, config cross-validation, lock-liveness accuracy, gate-loop
+re-entry and crash-resume bugs, a gate YAML parser fix, `approve-retry`
+wired into the real driver for the first time, and — most significantly —
+Stage 6 auto-verify now requires real *driven-project* verification
+evidence (`verification.driven_project_commands` in config), not just
+Catenna's own test health, before it can auto-accept a driven project's
+change. This pass is ongoing hardening rather than a discrete numbered
+phase, so it has no `phase-N-handoff.md`; see the Changelog section at the
+bottom and `git log` for full detail.
 
 ## Two pipelines, one task-artifact format
 
@@ -40,22 +61,28 @@ through the same 8-stage workflow and read/write the same
 | 07       | `07_diff_review.md`              | Independent diff review               |
 | 08       | `08_decision.md`                 | Accept / reject / needs-follow-up     |
 
-`AGENTS.md` treats `04_final_codex_brief.md` as the implementation contract and
-`07_diff_review.md`/`08_decision.md` as follow-up context; `status.json` files
-can go stale relative to the human-readable stage artifacts, so the artifacts
-are the source of truth when they disagree.
+Each driven project's own agent-facing instructions (its `AGENTS.md`, if it
+has one) typically treat `04_final_codex_brief.md` as the implementation
+contract and `07_diff_review.md`/`08_decision.md` as follow-up context —
+that convention lives in the driven project, not in this repo.
+`.orchestrator/state.json` can go stale relative to the human-readable stage
+artifacts, so the artifacts are the source of truth when they disagree
+(`reconcile_artifacts` exists precisely to resync state.json from them).
 
 ## Legacy pipeline: `Makefile` / `Makefile.legacy`
 
 Bash-driven, calls a `claude`/`codex`/`agy` CLI per stage via shell, all 8
-stages plus `followup-*` targets. `Makefile.legacy` is the pre-refactor
-version of `Makefile` (uses `$(MAKE)` recipe-internal recursion instead of
+stages plus `followup-*` targets. Lives entirely in each driven project's
+own repo, not here. `Makefile.legacy` is the pre-refactor version of
+`Makefile` (uses `$(MAKE)` recipe-internal recursion instead of
 `$(SELF_MAKE)`) — functionally the same pipeline, kept only as a rollback
 reference. **`Makefile.orchestrator` is now canonical for all of Stages
-00-08** as of Phase 3 (see [PHASES.md](PHASES.md)); the legacy Makefile
-remains available as a fully manual fallback and for `followup-from-review`,
-which Phase 3 deliberately left unautomated. Do not delete `Makefile.legacy`
-until no task is mid-flight on its stage targets.
+00-08** as of Phase 3 — it's a thin per-project wrapper that shells out to
+this repo's `python3 -m agent_pipeline.cli`; the legacy Makefile remains
+available as a fully manual fallback and for `followup-from-review`, which
+remains deliberately unautomated (see "Known gaps"). Do not delete
+`Makefile.legacy` from a driven project until no task there is mid-flight on
+its stage targets.
 
 Stage 6/7/8 in the legacy pipeline are entirely manual: Stage 6 opens
 `$EDITOR` on a blank template, Stage 7 hand-runs one review agent, Stage 8 is
@@ -64,7 +91,7 @@ template generator that scaffolds a new task directory from a Stage 7 review.
 The Python orchestrator's real driver (below) now automates the Stage 6-8
 equivalent of this; `followup-from-review` remains legacy-only.
 
-## Python orchestrator: `tools/agent_pipeline/`
+## Python orchestrator: `agent_pipeline/`
 
 A from-scratch, reliability-focused rewrite. Two parallel drivers share the
 same state machine:
@@ -100,8 +127,13 @@ auto_verified_eligible = (
     and verification_report is not None
     and verification_report["overall_status"] == "passed"
     and verification_report["test_coverage_delta_signal"]["status"] != "flagged"
+    and verification_report["driven_project_verified"] is True
 )
 ```
+
+(`driven_project_verified` was added in the post-Phase-5 hardening pass —
+see "Known gaps" below for what it means for a driven project with no
+`verification.driven_project_commands` configured.)
 
 and, if eligible and the handoff's route isn't already `blocked`/
 `administrator_action`, calls `overseer.upgrade_to_auto_verified` to force
@@ -194,22 +226,32 @@ Key modules:
   right after Stage 5's manifest is generated (`allow_pid=os.getpid()` lets
   the latter call bypass `check_concurrency_guard`'s otherwise-correct
   refusal to run while *this same task's* lock is held — see "Stage 6
-  auto-verification" above). Three checks —
-  `unit_tests` (`python3 -m unittest discover -s tools/agent_pipeline/tests`),
-  `mock_pipeline` (`python3 -m tools.agent_pipeline.cli mock-test`),
-  `gradle_compileJava` (optionally also `gradle_build` with `--build`/`BUILD=1`)
-  — plus a detection-only `test_coverage_delta_signal` that flags Stage 5
-  changed files touching testable source (`.py`/`.java`) without a matching
-  change under `tools/agent_pipeline/tests/` or `src/test/`. All three
-  subprocess checks reuse `real_runner.run_to_files` rather than a fourth
-  ad-hoc subprocess pattern. Writes `<task>/05_verification_report.{json,md}`
-  and, when `05_implementation_manifest.json` exists for the task, fills in
-  that manifest's long-standing `verification: {unit_tests, mock_pipeline,
+  auto-verification" above). Checks against Catenna's own repo (always run,
+  cwd=`PACKAGE_ROOT`) —
+  `unit_tests` (`python3 -m unittest discover -s agent_pipeline/tests`),
+  `mock_pipeline` (`python3 -m agent_pipeline.cli mock-test`),
+  `gradle_compileJava` (optionally also `gradle_build` with `--build`/`BUILD=1`,
+  `run_gradle` no longer clobbers a pre-existing `JAVA_HOME`) — plus a
+  detection-only `test_coverage_delta_signal` that flags Stage 5 changed
+  files touching testable source (`.py`/`.java`) without a matching change
+  under `agent_pipeline/tests/` or `src/test/`. Since the post-Phase-5
+  hardening pass, a separate `run_driven_project_checks` also runs any
+  commands configured under `verification.driven_project_commands` in
+  `.agent-pipeline/config/orchestrator.json`, with `cwd=repo_root` (the
+  *driven* project, not Catenna) — `driven_project_verified` in the report
+  is `true` only if at least one such command is configured, attempted, and
+  none failed; zero configured commands makes Stage 6 auto-verify
+  categorically ineligible for that project regardless of Catenna's own
+  test results (see "Stage 6 auto-verification" and "Known gaps"). All
+  subprocess checks reuse `real_runner.run_to_files` rather than an ad-hoc
+  subprocess pattern. Writes `<task>/05_verification_report.{json,md}` and,
+  when `05_implementation_manifest.json` exists for the task, fills in that
+  manifest's long-standing `verification: {unit_tests, mock_pipeline,
   diff_check}` placeholders (previously always `"not_attempted"`) plus
   appends to `verification_evidence` — additive, only touches those two
   fields, never `changed_files`/`stage5_run`. See
-  [phase-2-handoff.md](handoffs/phase-2-handoff.md) for the full JSON report
-  schema.
+  [phase-2-handoff.md](handoffs/phase-2-handoff.md) for the original JSON
+  report schema (the driven-project fields are additive on top of it).
 - `usage.py` (Phase 4) — cross-task, cross-run persistent state under
   `.agent-pipeline/usage/`, independent of `controller`/`TASKS_ROOT` to
   avoid a circular import: `ledger.jsonl` (one line per real agent
@@ -260,31 +302,41 @@ fall back to the next configured candidate, or block for human approval
 (`approve-retry`/`unlock` commands). `choose_real_agent` skips any candidate
 that would violate an `independent_from` constraint.
 
-## Known gaps (as of Phase 5)
+## Known gaps (as of the post-Phase-5 hardening pass, 2026-08-07)
 
-- No live `.agent-pipeline/config/orchestrator.json` exists (only timestamped
-  backups: `orchestrator.json.before-claude-stage5-turn-increase-...` and
-  `orchestrator.json.profile-era`) — real pipeline runs are silently on
-  `DEFAULT_CONFIG`, not any tuned configuration. Not fixed by this redesign;
-  flagged here for future attention.
+- `.agent-pipeline/config/orchestrator.json` now exists and is live in this
+  repo (it didn't at the end of Phase 5, when only timestamped backups like
+  `orchestrator.json.before-claude-stage5-turn-increase-...` and
+  `orchestrator.json.profile-era` were present). It currently sets
+  `roles.overseer`, `turn_budgets["07"]`, and one
+  `verification.driven_project_commands` entry — this repo's own test suite,
+  since Catenna self-hosts on itself here with no separate driven project
+  configured yet. Any *other* driven project needs its own
+  `orchestrator.json` with real `driven_project_commands`, or Stage 6
+  auto-verify is categorically ineligible for it (`driven_project_verified`
+  can never be `True` with zero configured commands — see "Stage 6
+  auto-verification" above).
 - `followup-from-review` (scaffolding a new correction task from a rejected
   or needs-followup Stage 7 review) remains legacy-bash-only; not automated
-  by Phase 3. A human still runs it by hand off of `07_diff_review.md`/
-  `08_decision.md`, which Phase 3 populates in the same legacy-compatible
-  format/paths regardless of whether they were produced automatically or by
-  a human. Deferred, not scheduled to a specific future phase.
+  by Phase 3 or the hardening pass that followed it. A human still runs it
+  by hand off of `07_diff_review.md`/`08_decision.md`, which the real driver
+  populates in the same legacy-compatible format/paths regardless of
+  whether they were produced automatically or by a human. Deferred, not
+  scheduled to a specific future phase.
 - `run_real_pipeline`'s auto_verified path never invokes real in-game/manual
-  testing — it is gated on build/unit-test/coverage-signal evidence only,
-  which cannot catch GUI/gameplay regressions. `enable_auto_verified: false`
-  in `.agent-pipeline/config/orchestrator.json` disables it repo-wide if this
+  testing — even with `driven_project_verified` now required, it's still
+  gated on whatever commands a driven project configures (build/unit-test/
+  coverage-signal evidence), which cannot catch GUI/gameplay regressions
+  unless a project scripts one. `enable_auto_verified: false` in
+  `.agent-pipeline/config/orchestrator.json` disables it repo-wide if this
   proves too aggressive; a human can also always overwrite an
   auto-generated `06_manual_test_notes.md` before Stage 7 runs.
-- Of the task directories with live `.orchestrator/` state that predate this
-  phase, any sitting at `awaiting_human_test` with Stage 6 already completed
-  by a human (but Stage 7/8 never manually run) will now have Stage 7/8
-  driven automatically on their next `pipeline-run` — previously a permanent
-  dead end (see "Real driver" above). Tasks with no Stage 6 file yet are
-  unaffected.
+- Of the task directories with live `.orchestrator/` state that predate
+  Phase 3, any sitting at `awaiting_human_test` with Stage 6 already
+  completed by a human (but Stage 7/8 never manually run) will now have
+  Stage 7/8 driven automatically on their next `pipeline-run` — previously a
+  permanent dead end (see "Real driver" above). Tasks with no Stage 6 file
+  yet are unaffected.
 - Live visibility granularity varies by agent: claude streams true
   token-level deltas (coalesced by `pipeline-tail` into one line per
   structural transition, e.g. "responding..."); codex/agy stream
@@ -330,30 +382,91 @@ that would violate an `independent_from` constraint.
 
 ## Command table
 
-The only interface a user should need is `make -f Makefile.orchestrator
-<target> TASK=...` (raw `python3 -m tools.agent_pipeline.cli ...` is the
-implementation underneath and is not a documented user-facing path). This
-table grows as later phases add commands.
+This repo has no Makefile — invoke the CLI directly as `python3 -m
+agent_pipeline.cli <command> --task TASK [options]` (see `agent_pipeline/cli.py`
+for the exact argparse definitions). A driven project's own
+`Makefile.orchestrator` is a thin wrapper around the same commands, pointed
+at this repo. This table grows as commands are added.
 
-| Target                  | Required vars                | What it does                                   |
-|--------------------------|-------------------------------|-------------------------------------------------|
-| `help`                   | —                              | Prints CLI help.                                |
-| `pipeline-status`        | `TASK`                         | Shows controller status for a task.             |
-| `pipeline-dry-run`       | `TASK`                         | Shows resumable work without mutating state.    |
-| `pipeline-mock-test`     | —                              | Runs isolated deterministic mock scenarios.     |
-| `pipeline-mock-run`      | `TASK`, `SCENARIO`              | Runs one deterministic mock scenario.           |
-| `pipeline-run`           | `TASK` (`ALLOW_DIRTY=1` opt.)   | Runs/resumes the real Stage 00-08 pipeline.     |
-| `pipeline-resume`        | `TASK`                         | Alias for `pipeline-run`.                       |
-| `pipeline-approve-retry` | `TASK`, `APPROVAL_ID`           | Approves one pending expensive retry.           |
-| `pipeline-unlock`        | `TASK`, `REASON`                | Explicitly removes an orchestrator lock.        |
-| `pipeline-tail`          | `TASK` (`STAGE`/`RUN_ID` opt.)  | Live-tails the current/most recent agent run.   |
-| `pipeline-brief`         | `TASK` (`STAGE`/`RUN_ID` opt.)  | Prints a compact summary of a run.              |
-| `pipeline-verify`        | `TASK` (`BUILD=1` opt.)         | Runs build/test checks, writes a verification report. |
-| `pipeline-usage`         | — (`TASK`/`AGENT`/`SINCE_HOURS` opt.) | Prints a usage/cost summary from the cross-task ledger, plus active cross-task cooldowns. |
-| `pipeline-report`        | `TASK`                         | Prints a legible per-task report: stages, decision, verification, usage, reasoning traces. |
+| Command          | Required flags        | Optional flags                    | What it does                                   |
+|-------------------|-------------------------|-------------------------------------|-------------------------------------------------|
+| `status`          | `--task`                | —                                    | Shows controller status for a task.             |
+| `dry-run`         | `--task`                | —                                    | Shows resumable work without mutating state.    |
+| `mock-test`       | —                        | —                                    | Runs isolated deterministic mock scenarios.     |
+| `mock-run`        | `--task`, `--scenario`  | —                                    | Runs one deterministic mock scenario.           |
+| `pipeline-run`    | `--task`                | `--allow-dirty`                     | Runs/resumes the real Stage 00-08 pipeline.     |
+| `approve-retry`   | `--task`, `--approval-id` | —                                  | Approves one pending expensive retry.           |
+| `unlock`          | `--task`, `--reason`    | —                                    | Explicitly removes an orchestrator lock.        |
+| `pipeline-tail`   | `--task`                | `--stage`, `--run-id`               | Live-tails the current/most recent agent run.   |
+| `pipeline-brief`  | `--task`                | `--stage`, `--run-id`               | Prints a compact summary of a run.              |
+| `pipeline-verify` | `--task`                | `--build` (also runs `./gradlew build`, not just `compileJava`) | Runs build/test + driven-project checks, writes a verification report. |
+| `pipeline-usage`  | —                        | `--task`, `--agent`, `--since-hours` | Prints a usage/cost summary from the cross-task ledger, plus active cross-task cooldowns. |
+| `pipeline-report` | `--task`                | —                                    | Prints a legible per-task report: stages, decision, verification, usage, reasoning traces. |
+
+There is no `resume`/`pipeline-resume` command — `pipeline-run` itself
+resumes from wherever `reconcile_artifacts` finds the task, since resuming
+after an interruption is safe by construction (see "State machine" above).
 
 ## Changelog
 
+- **Post-Phase-5 hardening** (2026-08-06 to 2026-08-07): several rounds of
+  audit-driven fixes, most driven end-to-end through Catenna's own real
+  pipeline against this repo (self-hosted — see task directories under
+  `.agent-pipeline/tasks/hardening-*`, gitignored). Highlights, newest
+  first:
+  - `db1206f`/`112991a`: `approve-retry` wired into the real driver for the
+    first time (`ensure_real_stage` now checks for an owning
+    `pending_approval` at entry, and a `max_turns` failure that can't
+    finalize now requests human approval — gated one-time per stage per
+    task — instead of permanently blocking); fixed the gate YAML parser
+    rejecting quoted strings with backslash-escaped internal quotes, hit for
+    real during that same task.
+  - `b556854`: Stage 6 auto-verify now additionally requires
+    `driven_project_verified` from a new `verification.driven_project_commands`
+    config list run against the driven project's own `repo_root` — previously
+    auto-verify only checked Catenna's own internal test health, so a driven
+    project with no configured checks could have a broken change
+    auto-accepted (see "Stage 6 auto-verification" and "Known gaps" above).
+  - `2e9c2c2` (round 4): `invalidated_from("05")` now also invalidates `06`;
+    seed-stage (00/01) validation failures now clear `completed_stages`
+    instead of leaving it stale; `locking.pid_live` distinguishes
+    permission-denied (live, different owner) from process-not-found (dead);
+    `config.validate_config` cross-checks more fields; `manifest.py` detects
+    files reverted to clean/deleted during Stage 5 and uses `git status -z`
+    to avoid path-quoting bugs on special-character filenames.
+  - `3a9b5c4` (round 3): fixed a crash-resume gap where resuming mid-gate-loop
+    after a rejected pass could reuse and mis-archive stale Stage 04/04_gate
+    content; leading-commentary stripping now applies to every stage's
+    contract heading, not just `04_gate`.
+  - `c5689a2` (round 2): named `FAILURE_CLASS_*` constants replace ad-hoc
+    failure-class strings repo-wide; `real_process_invoked` now only becomes
+    `True` after `subprocess.Popen` actually returns; subprocess JSONL stdout
+    is parsed once per `invoke_agent` call and reused across
+    classify/extract/usage/reasoning instead of re-parsing independently;
+    Stage 04's prompt "Output format" heading list now derives from the
+    artifact contract instead of drifting from it.
+  - `6a99d65`: `task_dir_for()` validates task ids and asserts containment
+    under `TASKS_ROOT`; `run_gradle` no longer clobbers a pre-existing
+    `JAVA_HOME`; `config.validate_config` cross-checks every role's
+    primary/fallback agents actually exist in `config["agents"]`; the CLI's
+    `prog` string updated to the post-extraction module path
+    (`python3 -m agent_pipeline.cli`).
+  - `c362f4b`: fixed Stage 4's gate loop re-running (and exhausting
+    `max_gate_passes`) on every `pipeline-run` even after the gate was
+    already accepted.
+  - `7a349cb`: removed two dead config knobs
+    (`temporary_full_retry_budget`, `hard_max_gate_passes`) that were
+    validated but never read anywhere in the orchestrator.
+  - `4a8ef67`: extracted the orchestrator from `immersive-enchanting-1122`
+    (`tools/agent_pipeline/`) into this standalone repo (`agent_pipeline/`)
+    — the relocation this document's "Relocation note" describes.
+
+  229 (end of Phase 5) → 306 tests over this pass, all green throughout —
+  see individual commit messages (`git log`) for exact test deltas per
+  commit and full rationale; several items involved a real design call made
+  with the maintainer and independently sanity-checked by a second agent
+  before implementation (see each task's `00_original_request.md` under
+  `.agent-pipeline/tasks/`, gitignored).
 - **Phase 5** (2026-08-05): new `stream_events.reasoning_summary` (codex
   `reasoning`-typed `item.completed` items, claude `thinking_delta`
   content-block deltas accumulated per block index; agy always `None`, no
