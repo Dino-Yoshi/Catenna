@@ -1,8 +1,11 @@
 from __future__ import print_function
 
+import io
 import unittest
+from contextlib import redirect_stdout
 
 from agent_pipeline import cli
+from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_SUCCESS
 
 
 class CliParserTests(unittest.TestCase):
@@ -58,6 +61,93 @@ class CliParserTests(unittest.TestCase):
 
         args = parser.parse_args(["usage", "--task", "some-task"])
         self.assertEqual(args.task, "some-task")
+
+    def test_tasks_plain_flag_parses(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["tasks", "--plain"])
+        self.assertTrue(args.plain)
+
+        args = parser.parse_args(["tasks"])
+        self.assertFalse(args.plain)
+
+
+class CliHelpCommandTests(unittest.TestCase):
+    def test_help_with_no_command_matches_top_level_help(self):
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+
+        top_level = io.StringIO()
+        with redirect_stdout(top_level):
+            parser.print_help()
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.print_help_for(parser, sub, None)
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(output.getvalue(), top_level.getvalue())
+
+    def test_help_for_renamed_command_matches_its_own_help_flag(self):
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+
+        direct = io.StringIO()
+        with redirect_stdout(direct):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["verify", "--help"])
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.print_help_for(parser, sub, "verify")
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(output.getvalue(), direct.getvalue())
+
+    def test_help_for_alias_resolves_to_shared_subparser(self):
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+
+        ls_output = io.StringIO()
+        with redirect_stdout(ls_output):
+            cli.print_help_for(parser, sub, "ls")
+
+        tasks_output = io.StringIO()
+        with redirect_stdout(tasks_output):
+            cli.print_help_for(parser, sub, "tasks")
+
+        self.assertEqual(ls_output.getvalue(), tasks_output.getvalue())
+
+    def test_help_for_unknown_command_is_clear_error_not_traceback(self):
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.print_help_for(parser, sub, "bogus-command")
+
+        self.assertEqual(code, EXIT_BAD_INPUT)
+        self.assertIn("unknown command", output.getvalue())
+        self.assertIn("verify", output.getvalue())
+
+
+class CliCompletionCommandTests(unittest.TestCase):
+    def test_completion_bash_registers_completion_function(self):
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+
+        script = cli.build_completion_bash(sub)
+
+        self.assertIn("complete -F _catenna_complete catenna", script)
+
+    def test_completion_bash_mentions_every_top_level_command(self):
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+
+        script = cli.build_completion_bash(sub)
+
+        for name in sub.choices:
+            self.assertIn(name, script)
 
 
 if __name__ == "__main__":

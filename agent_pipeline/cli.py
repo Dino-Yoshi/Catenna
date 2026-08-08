@@ -3,15 +3,16 @@
 from __future__ import print_function
 
 import argparse
+import shlex
 import sys
 
-from . import controller
+from . import color, controller
 
 
 def resolved(args):
     task, used_default = controller.resolve_task(args.task)
     if used_default:
-        print("(using current task: %s)" % task, file=sys.stderr)
+        print(color.dim("(using current task: %s)" % task, sys.stderr), file=sys.stderr)
     return task
 
 
@@ -54,8 +55,123 @@ def build_parser():
     use = sub.add_parser("use", aliases=["select", "set"], help="set (or show) the current-task pointer")
     use.add_argument("task", nargs="?")
     use.set_defaults(func=lambda a: controller.use_task(a.task))
-    sub.add_parser("tasks", aliases=["ls"], help="list task directories and their state").set_defaults(func=lambda a: controller.list_tasks())
+    tasks_cmd = sub.add_parser("tasks", aliases=["ls"], help="list task directories and their state")
+    tasks_cmd.add_argument("--plain", action="store_true", help="print bare task names only, one per line")
+    tasks_cmd.set_defaults(func=lambda a: controller.list_tasks(plain=a.plain))
+
+    help_parser = sub.add_parser("help", help="show help for catenna or a specific command")
+    help_parser.add_argument("command", nargs="?")
+    help_parser.set_defaults(func=lambda a: print_help_for(parser, sub, a.command))
+
+    completion_parser = sub.add_parser("completion", help="print a shell completion script")
+    completion_parser.add_argument("shell", choices=["bash"])
+    completion_parser.set_defaults(func=lambda a: print_completion(sub))
     return parser
+
+
+def print_help_for(parser, sub, command):
+    if command is None:
+        parser.print_help()
+        return controller.EXIT_SUCCESS
+    target = sub.choices.get(command)
+    if target is None:
+        print("unknown command: %s" % command)
+        print("available commands: " + ", ".join(sorted(sub.choices)))
+        return controller.EXIT_BAD_INPUT
+    target.print_help()
+    return controller.EXIT_SUCCESS
+
+
+def print_completion(sub):
+    print(build_completion_bash(sub))
+    return controller.EXIT_SUCCESS
+
+
+def _subparser_metadata(subparser):
+    options = []
+    value_options = []
+    has_task = False
+    for action in subparser._actions:
+        if action.option_strings:
+            if "-h" in action.option_strings or "--help" in action.option_strings:
+                continue
+            options.extend(action.option_strings)
+            if action.nargs != 0:
+                value_options.extend(action.option_strings)
+        elif action.dest == "task":
+            has_task = True
+    return {
+        "options": sorted(set(options)),
+        "value_options": sorted(set(value_options)),
+        "has_task": has_task,
+    }
+
+
+def build_completion_bash(sub):
+    command_names = sorted(sub.choices)
+    metadata_by_id = {}
+    metadata_by_name = {}
+    for name, subparser in sub.choices.items():
+        if id(subparser) not in metadata_by_id:
+            metadata_by_id[id(subparser)] = _subparser_metadata(subparser)
+        metadata_by_name[name] = metadata_by_id[id(subparser)]
+
+    lines = []
+    lines.append("# catenna bash completion")
+    lines.append("# install with:")
+    lines.append('#   eval "$(catenna completion bash)"')
+    lines.append("# (add that line to ~/.bashrc to load it on every shell startup)")
+    lines.append("_catenna_complete() {")
+    lines.append("    local cur prev cmd")
+    lines.append('    cur="${COMP_WORDS[COMP_CWORD]}"')
+    lines.append("    COMPREPLY=()")
+    lines.append("")
+    lines.append("    local commands=(%s)" % " ".join(shlex.quote(n) for n in command_names))
+    lines.append("")
+    lines.append('    if [ "$COMP_CWORD" -eq 1 ]; then')
+    lines.append('        COMPREPLY=( $(compgen -W "${commands[*]}" -- "$cur") )')
+    lines.append("        return 0")
+    lines.append("    fi")
+    lines.append("")
+    lines.append('    cmd="${COMP_WORDS[1]}"')
+    lines.append("")
+    lines.append('    if [ "$cmd" = "completion" ] && [ "$COMP_CWORD" -eq 2 ]; then')
+    lines.append('        COMPREPLY=( $(compgen -W "bash" -- "$cur") )')
+    lines.append("        return 0")
+    lines.append("    fi")
+    lines.append("")
+    lines.append('    if [ "$cmd" = "help" ] && [ "$COMP_CWORD" -eq 2 ]; then')
+    lines.append('        COMPREPLY=( $(compgen -W "${commands[*]}" -- "$cur") )')
+    lines.append("        return 0")
+    lines.append("    fi")
+    lines.append("")
+    lines.append('    prev="${COMP_WORDS[COMP_CWORD-1]}"')
+    lines.append("")
+    lines.append('    case "$cmd" in')
+    for name in command_names:
+        meta = metadata_by_name[name]
+        lines.append("        %s)" % shlex.quote(name))
+        if meta["value_options"]:
+            pattern = "|".join(shlex.quote(v) for v in meta["value_options"])
+            lines.append('            case "$prev" in')
+            lines.append("                %s)" % pattern)
+            lines.append("                    return 0")
+            lines.append("                    ;;")
+            lines.append("            esac")
+        if meta["options"]:
+            opts = " ".join(shlex.quote(v) for v in meta["options"])
+            lines.append('            if [[ "$cur" == -* ]]; then')
+            lines.append("                COMPREPLY=( $(compgen -W %s -- \"$cur\") )" % shlex.quote(opts))
+            lines.append("                return 0")
+            lines.append("            fi")
+        if meta["has_task"]:
+            lines.append('            COMPREPLY=( $(compgen -W "$(catenna tasks --plain 2>/dev/null)" -- "$cur") )')
+            lines.append("            return 0")
+        lines.append("            ;;")
+    lines.append("    esac")
+    lines.append("}")
+    lines.append("complete -F _catenna_complete catenna")
+    return "\n".join(lines)
 
 
 def add_task(parser):
@@ -72,7 +188,7 @@ def main(argv=None):
     try:
         return args.func(args)
     except controller.ControllerError as exc:
-        print(str(exc))
+        print(color.red(str(exc), sys.stderr), file=sys.stderr)
         return exc.exit_code
 
 
