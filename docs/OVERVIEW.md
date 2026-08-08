@@ -3,14 +3,16 @@
 Living document for `agent_pipeline/` — "Catenna", the Python orchestrator —
 and how it relates to the legacy bash pipeline (`Makefile`/`Makefile.legacy`)
 that lives in each *driven project*'s own repo. This repo is Catenna's
-standalone home and contains no Makefile of its own; invoke it directly as
-`python3 -m agent_pipeline.cli <command> --task ...` (see "Command table"
+standalone home and contains no Makefile of its own; invoke it via the
+installed `catenna <command> [task] ...` shortcut (`pip install -e .`), or
+directly as `python3 -m agent_pipeline.cli <command> [task] ...` — same
+code, same commands, both forms fully supported (see "Command table"
 below).
 
 This snapshot reflects the system through Phase 5 of the original redesign
 (history below) plus the post-extraction hardening pass that has followed
-on branch `v1-fixes`/`v1-cleanup` (see "Post-Phase-5 hardening" below and
-the Changelog at the bottom). 306 tests, all green:
+on branch `v1-fixes`/`v1-cleanup`/`v1-simplification` (see "Post-Phase-5
+hardening" below and the Changelog at the bottom). 321 tests, all green:
 `python3 -m unittest discover -s agent_pipeline/tests`.
 
 **Relocation note (2026-08-05):** Phases 0-5 below were built and tested
@@ -382,33 +384,60 @@ that would violate an `independent_from` constraint.
 
 ## Command table
 
-This repo has no Makefile — invoke the CLI directly as `python3 -m
-agent_pipeline.cli <command> --task TASK [options]` (see `agent_pipeline/cli.py`
+This repo has no Makefile — invoke the CLI as `catenna <command> [task]
+[options]` (once installed via `pip install -e .`) or equivalently `python3
+-m agent_pipeline.cli <command> [task] [options]` (see `agent_pipeline/cli.py`
 for the exact argparse definitions). A driven project's own
 `Makefile.orchestrator` is a thin wrapper around the same commands, pointed
 at this repo. This table grows as commands are added.
 
-| Command          | Required flags        | Optional flags                    | What it does                                   |
-|-------------------|-------------------------|-------------------------------------|-------------------------------------------------|
-| `status`          | `--task`                | —                                    | Shows controller status for a task.             |
-| `dry-run`         | `--task`                | —                                    | Shows resumable work without mutating state.    |
-| `mock-test`       | —                        | —                                    | Runs isolated deterministic mock scenarios.     |
-| `mock-run`        | `--task`, `--scenario`  | —                                    | Runs one deterministic mock scenario.           |
-| `pipeline-run`    | `--task`                | `--allow-dirty`                     | Runs/resumes the real Stage 00-08 pipeline.     |
-| `approve-retry`   | `--task`, `--approval-id` | —                                  | Approves one pending expensive retry.           |
-| `unlock`          | `--task`, `--reason`    | —                                    | Explicitly removes an orchestrator lock.        |
-| `pipeline-tail`   | `--task`                | `--stage`, `--run-id`               | Live-tails the current/most recent agent run.   |
-| `pipeline-brief`  | `--task`                | `--stage`, `--run-id`               | Prints a compact summary of a run.              |
-| `pipeline-verify` | `--task`                | `--build` (also runs `./gradlew build`, not just `compileJava`) | Runs build/test + driven-project checks, writes a verification report. |
-| `pipeline-usage`  | —                        | `--task`, `--agent`, `--since-hours` | Prints a usage/cost summary from the cross-task ledger, plus active cross-task cooldowns. |
-| `pipeline-report` | `--task`                | —                                    | Prints a legible per-task report: stages, decision, verification, usage, reasoning traces. |
+`task` is a **positional, optional** argument on every task-taking command
+except `usage`. If omitted, the command falls back to the current-task
+pointer set by `use`/`select`/`set`; if neither is available it fails with a
+clear error instead of an argparse usage dump. `usage`'s own `--task` flag
+is a separate, independent thing — a *filter* (default: all tasks), not a
+target, and it never consults the current-task pointer.
 
-There is no `resume`/`pipeline-resume` command — `pipeline-run` itself
-resumes from wherever `reconcile_artifacts` finds the task, since resuming
-after an interruption is safe by construction (see "State machine" above).
+| Command             | Task argument            | Other flags                       | What it does                                   |
+|----------------------|----------------------------|--------------------------------------|-------------------------------------------------|
+| `status`             | positional, optional       | —                                    | Shows controller status for a task.             |
+| `dry-run`            | positional, optional       | —                                    | Shows resumable work without mutating state.    |
+| `mock-test`          | n/a (never takes a task)   | —                                    | Runs isolated deterministic mock scenarios.     |
+| `mock-run`           | positional, optional       | `--scenario` (required)             | Runs one deterministic mock scenario.           |
+| `run`                | positional, optional       | `--allow-dirty`                     | Runs/resumes the real Stage 00-08 pipeline.     |
+| `approve-retry`      | positional, optional       | `--approval-id` (required)          | Approves one pending expensive retry.           |
+| `unlock`             | positional, optional       | `--reason` (required)               | Explicitly removes an orchestrator lock.        |
+| `tail`               | positional, optional       | `--stage`, `--run-id`               | Live-tails the current/most recent agent run.   |
+| `brief`              | positional, optional       | `--stage`, `--run-id`               | Prints a compact summary of a run.              |
+| `verify`             | positional, optional       | `--build` (also runs `./gradlew build`, not just `compileJava`) | Runs build/test + driven-project checks, writes a verification report. |
+| `usage`              | `--task` (filter, default: all tasks) | `--agent`, `--since-hours` | Prints a usage/cost summary from the cross-task ledger, plus active cross-task cooldowns. |
+| `report`             | positional, optional       | —                                    | Prints a legible per-task report: stages, decision, verification, usage, reasoning traces. |
+| `use` / `select` / `set` | positional, optional    | —                                    | Sets the current-task pointer; with no argument, prints whatever is currently set. |
+| `tasks` / `ls`       | n/a (never takes a task)   | —                                    | Lists every task directory under `.agent-pipeline/tasks/` with its state, marking the current one. |
+
+There is no `resume` command — `run` itself resumes from wherever
+`reconcile_artifacts` finds the task, since resuming after an interruption
+is safe by construction (see "State machine" above).
 
 ## Changelog
 
+- **CLI ergonomics pass** (2026-08-08, branch `v1-simplification`): added a
+  `catenna` console-script entry point (`pyproject.toml`) alongside the
+  still-fully-supported `python3 -m agent_pipeline.cli` form (the latter is
+  load-bearing — `verification.py` shells out to it internally for
+  `mock-test`). Dropped the redundant `pipeline-` prefix from six commands
+  (`run`, `tail`, `brief`, `verify`, `usage`, `report`); `mock-run` /
+  `mock-test` / `status` / `dry-run` / `approve-retry` / `unlock` keep their
+  names unchanged. `--task` became a positional, optional argument on every
+  task-taking command, falling back to a new persisted current-task pointer
+  (`.agent-pipeline/current-task`) when omitted, with a clear error if
+  neither is set — see `controller.resolve_task`. Added `use`/`select`/`set`
+  (set-or-show the pointer) and `tasks`/`ls` (list task directories with
+  state, marking the current one) as new commands. `usage` deliberately
+  keeps its own independent `--task` filter semantics (default: all tasks)
+  rather than going through the pointer fallback. Clean break, no
+  back-compat aliases for the old `pipeline-*` names — this tool has no
+  external consumers yet.
 - **Post-Phase-5 hardening** (2026-08-06 to 2026-08-07): several rounds of
   audit-driven fixes, most driven end-to-end through Catenna's own real
   pipeline against this repo (self-hosted — see task directories under
