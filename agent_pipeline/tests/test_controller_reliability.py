@@ -45,6 +45,18 @@ class ControllerReliabilityTests(unittest.TestCase):
             code = controller.pipeline_verify(task)
         return code, output.getvalue()
 
+    def capture_run_background(self, task, allow_dirty=False):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = controller.pipeline_run_background(task, allow_dirty=allow_dirty)
+        return code, output.getvalue()
+
+    def capture_verify_background(self, task, run_build=False):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = controller.pipeline_verify_background(task, run_build=run_build)
+        return code, output.getvalue()
+
     def test_task_dir_for_accepts_safe_task_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -500,6 +512,85 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_VALIDATION)
             self.assertIn("invalid real-run config: bad verification", output)
+
+    def test_launch_background_spawns_module_cli_with_shared_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+            calls = []
+
+            class FakePopen(object):
+                def __init__(self, argv, **kwargs):
+                    self.pid = 4321
+                    calls.append((argv, kwargs))
+
+                def wait(self):
+                    raise AssertionError("wait must not be called")
+
+                def communicate(self):
+                    raise AssertionError("communicate must not be called")
+
+            original_popen = controller.subprocess.Popen
+            original_executable = controller.sys.executable
+            original_repo_root = controller.REPO_ROOT
+            controller.subprocess.Popen = FakePopen
+            controller.sys.executable = "/fake/python"
+            controller.REPO_ROOT = root / "repo"
+            self.addCleanup(lambda: setattr(controller.subprocess, "Popen", original_popen))
+            self.addCleanup(lambda: setattr(controller.sys, "executable", original_executable))
+            self.addCleanup(lambda: setattr(controller, "REPO_ROOT", original_repo_root))
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = controller.launch_background("bg-task", ["run", "bg-task"], "background_run.log")
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(len(calls), 1)
+            argv, kwargs = calls[0]
+            self.assertEqual(argv, ["/fake/python", "-m", "agent_pipeline.cli", "run", "bg-task"])
+            self.assertEqual(kwargs["stdin"], controller.subprocess.DEVNULL)
+            self.assertIs(kwargs["stdout"], kwargs["stderr"])
+            self.assertEqual(kwargs["cwd"], str(root / "repo"))
+            self.assertTrue(kwargs["start_new_session"])
+            self.assertTrue((root / "bg-task" / ".orchestrator" / "background_run.log").exists())
+            self.assertIn("child pid: 4321", output.getvalue())
+            self.assertIn("background_run.log", output.getvalue())
+
+    def test_pipeline_run_background_preserves_allow_dirty_and_prints_followups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+            calls = []
+
+            original = controller.launch_background
+            controller.launch_background = lambda task, argv_tail, log_name: calls.append((task, argv_tail, log_name)) or EXIT_SUCCESS
+            self.addCleanup(lambda: setattr(controller, "launch_background", original))
+
+            code, output = self.capture_run_background("bg-run", allow_dirty=True)
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(calls, [("bg-run", ["run", "bg-run", "--allow-dirty"], "background_run.log")])
+            self.assertNotIn("--background", calls[0][1])
+            self.assertIn("catenna tail bg-run", output)
+            self.assertIn("catenna status bg-run", output)
+
+    def test_pipeline_verify_background_preserves_build_and_prints_report_not_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+            calls = []
+
+            original = controller.launch_background
+            controller.launch_background = lambda task, argv_tail, log_name: calls.append((task, argv_tail, log_name)) or EXIT_SUCCESS
+            self.addCleanup(lambda: setattr(controller, "launch_background", original))
+
+            code, output = self.capture_verify_background("bg-verify", run_build=True)
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(calls, [("bg-verify", ["verify", "bg-verify", "--build"], "background_verify.log")])
+            self.assertNotIn("--background", calls[0][1])
+            self.assertIn(str(root / "bg-verify" / "05_verification_report.md"), output)
+            self.assertIn("catenna tail does not cover verify output", output)
 
     def test_status_prints_active_cross_task_cooldowns(self):
         with tempfile.TemporaryDirectory() as tmp:

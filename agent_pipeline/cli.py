@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 import argparse
+import os
 import shlex
 import sys
 
@@ -16,8 +17,26 @@ def resolved(args):
     return task
 
 
+def _prog_name():
+    if os.path.basename(sys.argv[0]) == "catenna":
+        return "catenna"
+    return "python3 -m agent_pipeline.cli"
+
+
+def run_command(args):
+    if args.background:
+        return controller.pipeline_run_background(resolved(args), args.allow_dirty)
+    return controller.pipeline_run(resolved(args), args.allow_dirty)
+
+
+def verify_command(args):
+    if args.background:
+        return controller.pipeline_verify_background(resolved(args), args.build)
+    return controller.pipeline_verify(resolved(args), args.build)
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(prog="python3 -m agent_pipeline.cli")
+    parser = argparse.ArgumentParser(prog=_prog_name())
     sub = parser.add_subparsers(dest="command")
     add_task(sub.add_parser("status", help="show controller status")).set_defaults(func=lambda a: controller.status(resolved(a)))
     add_task(sub.add_parser("dry-run", help="show resumable work without mutating state")).set_defaults(func=lambda a: controller.dry_run(resolved(a)))
@@ -27,7 +46,8 @@ def build_parser():
     mock_run.set_defaults(func=lambda a: controller.mock_run(resolved(a), a.scenario))
     run = add_task(sub.add_parser("run", help="run/resume real Stage 2-5 pipeline"))
     run.add_argument("--allow-dirty", action="store_true")
-    run.set_defaults(func=lambda a: controller.pipeline_run(resolved(a), a.allow_dirty))
+    run.add_argument("--background", action="store_true", help="launch and return immediately")
+    run.set_defaults(func=run_command)
     approve = add_task(sub.add_parser("approve-retry", help="approve one pending expensive retry"))
     approve.add_argument("--approval-id", required=True)
     approve.set_defaults(func=lambda a: controller.approve_retry(resolved(a), a.approval_id))
@@ -44,7 +64,8 @@ def build_parser():
     brief.set_defaults(func=lambda a: controller.pipeline_brief(resolved(a), a.stage, a.run_id))
     verify = add_task(sub.add_parser("verify", help="run build/test verification and write a structured report"))
     verify.add_argument("--build", action="store_true", help="also run ./gradlew build, not just compileJava")
-    verify.set_defaults(func=lambda a: controller.pipeline_verify(resolved(a), a.build))
+    verify.add_argument("--background", action="store_true", help="launch and return immediately")
+    verify.set_defaults(func=verify_command)
     usage_cmd = sub.add_parser("usage", help="print a usage/cost summary from the cross-task ledger")
     usage_cmd.add_argument("--task", help="filter to one task (default: all tasks)")
     usage_cmd.add_argument("--agent")

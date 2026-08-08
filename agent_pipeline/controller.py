@@ -7,6 +7,8 @@ import os
 import re
 import shutil
 import socket
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -328,6 +330,53 @@ def pipeline_verify(task, run_build=False):
     return EXIT_SUCCESS if report["overall_status"] == "passed" else EXIT_VALIDATION
 
 
+def launch_background(task, argv_tail, log_name):
+    task_dir = task_dir_for(task)
+    orch = task_dir / ".orchestrator"
+    orch.mkdir(parents=True, exist_ok=True)
+    log_path = orch / log_name
+    argv = [sys.executable, "-m", "agent_pipeline.cli"] + list(argv_tail)
+    log_handle = open(str(log_path), "a", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
+            cwd=str(REPO_ROOT),
+            start_new_session=True,
+        )
+    except Exception:
+        log_handle.close()
+        raise
+    log_handle.close()
+    print("started background command: %s" % " ".join(argv))
+    print("child pid: %s" % proc.pid)
+    print("log: %s" % log_path)
+    return EXIT_SUCCESS
+
+
+def pipeline_run_background(task, allow_dirty=False):
+    argv_tail = ["run", task]
+    if allow_dirty:
+        argv_tail.append("--allow-dirty")
+    code = launch_background(task, argv_tail, "background_run.log")
+    print("follow with: catenna tail %s" % task)
+    print("check status: catenna status %s" % task)
+    return code
+
+
+def pipeline_verify_background(task, run_build=False):
+    argv_tail = ["verify", task]
+    if run_build:
+        argv_tail.append("--build")
+    code = launch_background(task, argv_tail, "background_verify.log")
+    report_path = task_dir_for(task) / "05_verification_report.md"
+    print("verification report: %s" % report_path)
+    print("verify output is written to the background log/report; catenna tail does not cover verify output")
+    return code
+
+
 def pipeline_usage(task=None, agent=None, since_hours=None):
     entries = usage.read_entries(usage_ledger_path())
     if task:
@@ -496,7 +545,7 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
     stage5_current_run = False
     if "05" not in state.get("completed_stages", []):
         if not allow_dirty and git_status(REPO_ROOT):
-            block_transition(task_dir, state, "05", "Source working tree is not clean outside .agent-pipeline; rerun with ALLOW_DIRTY=1 if intentional", FAILURE_CLASS_SOURCE_FAILURE)
+            block_transition(task_dir, state, "05", "Source working tree is not clean outside .agent-pipeline; rerun with --allow-dirty if intentional", FAILURE_CLASS_SOURCE_FAILURE)
             return EXIT_BLOCKED
         baseline = capture_dirty_baseline(REPO_ROOT)
         state["dirty_baseline"] = baseline

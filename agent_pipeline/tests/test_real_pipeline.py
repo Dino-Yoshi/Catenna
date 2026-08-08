@@ -9,7 +9,7 @@ from pathlib import Path
 
 from agent_pipeline import controller
 from agent_pipeline import usage
-from agent_pipeline.failures import EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION, FAILURE_CLASS_MAX_TURNS
+from agent_pipeline.failures import EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION, FAILURE_CLASS_MAX_TURNS, FAILURE_CLASS_SOURCE_FAILURE
 from agent_pipeline.mock_agent import valid_artifact
 from agent_pipeline.state import CONTRACTS, load_state, new_state, orchestrator_dir, write_state_atomic
 
@@ -391,6 +391,29 @@ class RealPipelineTests(unittest.TestCase):
         self.assertEqual(state["current_stage"], "04_gate")
         self.assertEqual(state["completed_stages"], ["00", "01", "02", "03", "04"])
         self.assertFalse((self.task_dir / CONTRACTS["05"].filename).exists())
+
+    def test_stage5_dirty_source_block_names_allow_dirty_flag(self):
+        original_git_status = controller.git_status
+        original_ensure = controller.ensure_real_stage
+        controller.git_status = lambda root: " M source.py\n"
+
+        def ensure_without_stage5(*args, **kwargs):
+            if args[3] == "05":
+                raise AssertionError("Stage 5 should not run after dirty source block")
+            return original_ensure(*args, **kwargs)
+
+        controller.ensure_real_stage = ensure_without_stage5
+        self.addCleanup(lambda: setattr(controller, "git_status", original_git_status))
+        self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original_ensure))
+
+        code = controller.pipeline_run(self.task, allow_dirty=False)
+
+        self.assertEqual(code, EXIT_BLOCKED)
+        state = load_state(self.task_dir, self.task)
+        reason = state["last_failure"]["reason"]
+        self.assertIn("--allow-dirty", reason)
+        self.assertNotIn("ALLOW_DIRTY=1", reason)
+        self.assertEqual(state["last_failure"]["failure_class"], FAILURE_CLASS_SOURCE_FAILURE)
 
     def test_strict_mode_blocks_without_independent_stage4_reviewer(self):
         config = self.config()

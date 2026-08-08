@@ -17,6 +17,15 @@ Two equivalent forms, same code:
   it internally (`["-m", "agent_pipeline.cli", "mock-test"]`) — don't
   "clean up" this form away in some future pass; it's load-bearing, not
   just a legacy convenience.
+- `catenna run <task> --background` — starts the normal `run` command in a
+  detached child and returns after launch. The parent exit code only means
+  the child process was started, not that the pipeline succeeded. Follow
+  progress with `catenna tail <task>` and `catenna status <task>`.
+- `catenna verify <task> --background` — starts verification in a detached
+  child and returns after launch. The parent exit code only means the child
+  process was started. Check the verification report and
+  `.orchestrator/background_verify.log`; `catenna tail` does not cover
+  verify output.
 
 **Editable install only.** `pyproject.toml`'s setuptools config only lists
 `packages = ["agent_pipeline"]` — minimal on purpose. `pip install -e .` is
