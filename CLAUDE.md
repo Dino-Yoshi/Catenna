@@ -70,12 +70,39 @@ consumers. Controller function names (`pipeline_run`, `pipeline_verify`,
 etc., in `controller.py`) were **not** renamed — only the CLI-facing
 command strings and argument shapes changed.
 
+## Help, completion, and color
+
+- `catenna help` / `catenna help <command>` — git-style help, equivalent to
+  `catenna --help` / `catenna <command> --help`. Works for aliases too
+  (`catenna help ls` == `catenna help tasks`). An unknown command name is a
+  clear error (`EXIT_BAD_INPUT`), not a stack trace.
+- `catenna completion bash` — prints a bash tab-completion function,
+  generated at print-time from the live `build_parser()` (command names,
+  aliases, flags, and which commands take a positional task). Install with:
+  `eval "$(catenna completion bash)"` (e.g. in `~/.bashrc`) so it's
+  regenerated fresh each shell startup and can't go stale relative to the
+  installed `catenna`. Bash only — zsh/fish are out of scope. Dynamic
+  task-name completion shells out to `catenna tasks --plain`.
+- `catenna tasks --plain` / `catenna ls --plain` — bare task names, one per
+  line, no marker/state/color. Exists for the completion function to shell
+  out to; not meant for humans.
+- `agent_pipeline/color.py` — raw ANSI codes, stdlib-only (no `colorama`/
+  `rich`). Respects `NO_COLOR`/`FORCE_COLOR` and checks the destination
+  stream's `isatty()`, so piped/redirected output stays plain. Colors are
+  targeted, not comprehensive: task/run state in `status`/`tasks`
+  (running/awaiting-*=yellow, complete/passed=green,
+  failed/blocked/CORRUPT=red), pass/fail in `verify`, and
+  `ControllerError` messages (red, printed to stderr).
+
 ## Where things live
 
-- `agent_pipeline/cli.py` — argparse wiring; `build_parser()`.
+- `agent_pipeline/cli.py` — argparse wiring; `build_parser()`; also
+  `print_help_for`/`build_completion_bash` for the `help`/`completion`
+  commands.
 - `agent_pipeline/controller.py` — the actual command implementations,
   including `resolve_task`/`read_current_task`/`write_current_task`/
   `use_task`/`list_tasks` for the current-task pointer.
+- `agent_pipeline/color.py` — ANSI color helpers and the `STATE_COLOR` map.
 - `.agent-pipeline/tasks/<task>/` — per-task state and artifacts.
 - `.agent-pipeline/current-task` — the pointer file `use`/`select`/`set`
   read and write.

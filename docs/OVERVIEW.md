@@ -12,7 +12,7 @@ below).
 This snapshot reflects the system through Phase 5 of the original redesign
 (history below) plus the post-extraction hardening pass that has followed
 on branch `v1-fixes`/`v1-cleanup`/`v1-simplification` (see "Post-Phase-5
-hardening" below and the Changelog at the bottom). 321 tests, all green:
+hardening" below and the Changelog at the bottom). 339 tests, all green:
 `python3 -m unittest discover -s agent_pipeline/tests`.
 
 **Relocation note (2026-08-05):** Phases 0-5 below were built and tested
@@ -413,7 +413,22 @@ target, and it never consults the current-task pointer.
 | `usage`              | `--task` (filter, default: all tasks) | `--agent`, `--since-hours` | Prints a usage/cost summary from the cross-task ledger, plus active cross-task cooldowns. |
 | `report`             | positional, optional       | —                                    | Prints a legible per-task report: stages, decision, verification, usage, reasoning traces. |
 | `use` / `select` / `set` | positional, optional    | —                                    | Sets the current-task pointer; with no argument, prints whatever is currently set. |
-| `tasks` / `ls`       | n/a (never takes a task)   | —                                    | Lists every task directory under `.agent-pipeline/tasks/` with its state, marking the current one. |
+| `tasks` / `ls`       | n/a (never takes a task)   | `--plain`                            | Lists every task directory under `.agent-pipeline/tasks/` with its state, marking the current one. `--plain` prints bare task names only (used by shell completion). |
+| `help`               | n/a (own positional `command`) | —                                | `catenna help` == `catenna --help`; `catenna help <command>` == `catenna <command> --help`, looked up by name or alias. |
+| `completion`         | n/a (own positional `shell`) | —                                   | `catenna completion bash` prints a bash tab-completion function, generated from the live argparse parser. |
+
+Color: `status`/`tasks`/`verify` color state and pass/fail signals (state
+colors: running/awaiting-*=yellow, complete/passed=green,
+failed/blocked/CORRUPT=red) via `agent_pipeline/color.py`. Respects
+`NO_COLOR`/`FORCE_COLOR` and checks the destination stream's `isatty()` —
+no color when piped/redirected unless `FORCE_COLOR` is set.
+
+Bash tab-completion: `eval "$(catenna completion bash)"` (e.g. in
+`~/.bashrc`) installs a `_catenna_complete` function covering command
+names/aliases, each command's flags, and dynamic task-name completion
+(shelling out to `catenna tasks --plain`). Regenerated fresh each shell
+startup, so it can't go stale relative to the installed `catenna`. Bash
+only — zsh/fish are out of scope.
 
 There is no `resume` command — `run` itself resumes from wherever
 `reconcile_artifacts` finds the task, since resuming after an interruption
@@ -421,6 +436,19 @@ is safe by construction (see "State machine" above).
 
 ## Changelog
 
+- **CLI polish pass** (2026-08-08, branch `v1-simplification`): added bash
+  tab-completion (`catenna completion bash`, hand-rolled, zero new
+  dependencies — introspects `build_parser()` for command names/aliases/
+  flags/task-taking-ness, with hand-written bash control flow; install via
+  `eval "$(catenna completion bash)"`), targeted ANSI color
+  (`agent_pipeline/color.py`, stdlib-only, respects `NO_COLOR`/
+  `FORCE_COLOR`/`isatty()`, applied to task/run state in `status`/`tasks`,
+  pass/fail in `verify`, and `ControllerError` messages which now print to
+  stderr instead of stdout), and a git-style `catenna help [command]`
+  command. `tasks`/`ls` gained a `--plain` flag (bare task names, no color/
+  marker) that the completion function shells out to for dynamic task-name
+  completion. 18 new tests (`test_color.py`, plus additions to
+  `test_cli.py`/`test_current_task.py`).
 - **CLI ergonomics pass** (2026-08-08, branch `v1-simplification`): added a
   `catenna` console-script entry point (`pyproject.toml`) alongside the
   still-fully-supported `python3 -m agent_pipeline.cli` form (the latter is

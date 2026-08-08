@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from .artifacts import CONTRACTS, manual_test_decision, parse_gate, sha256_file, useful_partial, validate_file, validate_text
+from . import color
 from .config import ConfigError, configured_candidates, agent_config, load_config
 from .failures import (
     BANNED_COMMAND_WORDS,
@@ -156,25 +157,37 @@ def use_task(task):
     return EXIT_SUCCESS
 
 
-def list_tasks():
+def list_tasks(plain=False):
     """CLI-facing: list every task directory under TASKS_ROOT with its
-    state, marking whichever matches the current-task pointer."""
+    state, marking whichever matches the current-task pointer.
+
+    plain=True prints just the sorted task names, one per line, no
+    marker/state/color -- used by shell completion to enumerate task names."""
     if not TASKS_ROOT.exists():
-        print("no tasks found under %s" % TASKS_ROOT)
+        if not plain:
+            print("no tasks found under %s" % TASKS_ROOT)
         return EXIT_SUCCESS
     task_names = sorted(p.name for p in TASKS_ROOT.iterdir() if p.is_dir())
     if not task_names:
-        print("no tasks found under %s" % TASKS_ROOT)
+        if not plain:
+            print("no tasks found under %s" % TASKS_ROOT)
+        return EXIT_SUCCESS
+    if plain:
+        for name in task_names:
+            print(name)
         return EXIT_SUCCESS
     current = read_current_task()
     for name in task_names:
-        marker = "*" if name == current else " "
+        if name == current:
+            marker = color.bold(color.cyan("*"))
+        else:
+            marker = " "
         try:
             state = load_state(TASKS_ROOT / name, name)
             state_label = state["state"]
         except CorruptState:
             state_label = "CORRUPT"
-        print("%s %s  %s" % (marker, name, state_label))
+        print("%s %s  %s" % (marker, name, color.colorize_state(state_label)))
     return EXIT_SUCCESS
 
 
@@ -207,7 +220,7 @@ def status(task):
         return EXIT_VALIDATION
     reconcile_artifacts(task_dir, state, read_only=True)
     print("task: %s" % task)
-    print("state: %s" % state["state"])
+    print("state: %s" % color.colorize_state(state["state"]))
     print("current_stage: %s" % state["current_stage"])
     print("completed_stages: %s" % ", ".join(state["completed_stages"]))
     if state.get("run_unavailable_agents"):
@@ -294,16 +307,19 @@ def pipeline_verify(task, run_build=False):
     except verification.VerificationError as exc:
         print(str(exc))
         return EXIT_LOCKED
+    def pass_fail_color(status_value):
+        return color.green(status_value) if status_value == "passed" else color.red(status_value)
+
     print("task: %s" % task)
-    print("overall_status: %s" % report["overall_status"])
+    print("overall_status: %s" % pass_fail_color(report["overall_status"]))
     for check in report["checks"]:
         if "exit_code" in check:
             duration_seconds = check.get("duration_seconds")
             if duration_seconds is None:
                 duration_seconds = 0.0
-            print("  %s: %s (exit=%s, %.1fs)" % (check["name"], check["status"], check["exit_code"], duration_seconds))
+            print("  %s: %s (exit=%s, %.1fs)" % (check["name"], pass_fail_color(check["status"]), check["exit_code"], duration_seconds))
         else:
-            print("  %s: %s (%s)" % (check["name"], check["status"], check.get("reason", "")))
+            print("  %s: %s (%s)" % (check["name"], pass_fail_color(check["status"]), check.get("reason", "")))
     signal = report["test_coverage_delta_signal"]
     print("test_coverage_delta_signal: %s" % signal["status"])
     if signal.get("flagged_paths"):

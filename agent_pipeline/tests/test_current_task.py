@@ -106,6 +106,23 @@ class CurrentTaskTests(unittest.TestCase):
             self.assertTrue(any(line.startswith("*") and "task-b" in line for line in lines))
             self.assertTrue(any(not line.startswith("*") and "task-a" in line for line in lines))
 
+    def test_list_tasks_plain_prints_bare_sorted_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_repo_root(root)
+            tasks_root = root / ".agent-pipeline" / "tasks"
+            self.with_tasks_root(tasks_root)
+            (tasks_root / "task-b").mkdir(parents=True)
+            (tasks_root / "task-a").mkdir(parents=True)
+            controller.write_current_task("task-b")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = controller.list_tasks(plain=True)
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(output.getvalue().splitlines(), ["task-a", "task-b"])
+
     def test_list_tasks_handles_missing_tasks_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
