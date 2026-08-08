@@ -6,6 +6,12 @@ import hashlib
 import re
 from collections import namedtuple
 
+from .failures import (
+    FAILURE_CLASS_EMPTY_OUTPUT,
+    FAILURE_CLASS_MALFORMED_ARTIFACT,
+    FAILURE_CLASS_SOURCE_FAILURE,
+)
+
 ArtifactContract = namedtuple(
     "ArtifactContract",
     "filename heading legacy_heading sections gate final_line body_required decision",
@@ -204,17 +210,17 @@ def sha256_file(path):
 def validate_file(path, stage_key, read_only=False):
     contract = CONTRACTS[stage_key]
     if not path.exists():
-        return {"valid": False, "reason": "missing", "failure_class": "source_failure"}
+        return {"valid": False, "reason": "missing", "failure_class": FAILURE_CLASS_SOURCE_FAILURE}
     data = path.read_text(encoding="utf-8")
     return validate_text(data, contract, read_only=read_only)
 
 
 def validate_text(text, contract, read_only=False):
     if text == "":
-        return {"valid": False, "reason": "empty output", "failure_class": "empty_output"}
+        return {"valid": False, "reason": "empty output", "failure_class": FAILURE_CLASS_EMPTY_OUTPUT}
     lines = text.splitlines()
     if not lines:
-        return {"valid": False, "reason": "empty output", "failure_class": "empty_output"}
+        return {"valid": False, "reason": "empty output", "failure_class": FAILURE_CLASS_EMPTY_OUTPUT}
     first = lines[0].strip()
     accepted_heading = first == contract.heading
     if not accepted_heading and read_only and contract.legacy_heading:
@@ -224,20 +230,17 @@ def validate_text(text, contract, read_only=False):
             return {
                 "valid": False,
                 "reason": "leading commentary before required heading",
-                "failure_class": "malformed_artifact",
+                "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
             }
         return {
             "valid": False,
             "reason": "missing or wrong top-level heading",
-            "failure_class": "malformed_artifact",
+            "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
     if contract.body_required and not "\n".join(lines[1:]).strip():
-        return {"valid": False, "reason": "body is empty", "failure_class": "malformed_artifact"}
-    present_sections = set()
-    for line in lines:
-        match = re.match(r"^##\s+(.+?)\s*$", line)
-        if match:
-            present_sections.add(match.group(1))
+        return {"valid": False, "reason": "body is empty", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
+    sections = collect_sections(lines)
+    present_sections = set(sections)
     missing_sections = []
     if contract.filename == "06_manual_test_notes.md":
         if "Decision" not in present_sections and "Overall manual result" not in present_sections:
@@ -250,7 +253,14 @@ def validate_text(text, contract, read_only=False):
         return {
             "valid": False,
             "reason": "missing sections: " + ", ".join(missing_sections),
-            "failure_class": "malformed_artifact",
+            "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
+        }
+    empty_section = first_empty_required_section(contract, sections)
+    if empty_section is not None:
+        return {
+            "valid": False,
+            "reason": "section has no body content: " + empty_section,
+            "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
     if contract.gate:
         gate_result = parse_gate(text)
@@ -262,21 +272,27 @@ def validate_text(text, contract, read_only=False):
                 return {
                     "valid": False,
                     "reason": "missing gate key: " + key,
-                    "failure_class": "malformed_artifact",
+                    "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
                 }
             if not isinstance(gate[key], expected_type):
                 return {
                     "valid": False,
                     "reason": "wrong gate value type: " + key,
-                    "failure_class": "malformed_artifact",
+                    "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
                 }
+        if gate.get("ready_for_implementation") is True and gate.get("blocking_issues"):
+            return {
+                "valid": False,
+                "reason": "ready_for_implementation is true but blocking_issues is non-empty",
+                "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
+            }
     if contract.final_line:
         non_empty = [line.strip() for line in lines if line.strip()]
         if not non_empty or non_empty[-1] not in ("accept", "reject", "needs_followup"):
             return {
                 "valid": False,
                 "reason": "invalid final verdict line",
-                "failure_class": "malformed_artifact",
+                "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
             }
     if contract.decision:
         checked = 0
@@ -287,7 +303,7 @@ def validate_text(text, contract, read_only=False):
             return {
                 "valid": False,
                 "reason": "exactly one final decision checkbox must be checked",
-                "failure_class": "malformed_artifact",
+                "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
             }
     if contract.filename == "06_manual_test_notes.md":
         result = validate_manual_test_outcome(text)
@@ -296,20 +312,57 @@ def validate_text(text, contract, read_only=False):
     return {"valid": True, "reason": "valid"}
 
 
+def collect_sections(lines):
+    sections = {}
+    current = None
+    for line in lines:
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            current = match.group(1)
+            sections.setdefault(current, []).append([])
+            continue
+        if current is not None:
+            sections[current][-1].append(line)
+    return sections
+
+
+def first_empty_required_section(contract, sections):
+    if contract.filename == "06_manual_test_notes.md":
+        result_sections = []
+        result_sections.extend(sections.get("Decision", []))
+        result_sections.extend(sections.get("Overall manual result", []))
+        if result_sections and not any(section_body_has_content(section) for section in result_sections):
+            return "Decision or Overall manual result"
+        return None
+    for section in contract.sections:
+        bodies = sections.get(section, [])
+        if bodies and not any(section_body_has_content(body) for body in bodies):
+            return section
+    return None
+
+
+def section_body_has_content(body_lines):
+    for raw_line in body_lines:
+        line = raw_line.strip()
+        if line and not re.match(r"^##\s+.+?\s*$", line):
+            return True
+    return False
+
+
 def validate_manual_test_outcome(text):
     section = extract_last_section(text, ("Decision", "Overall manual result"))
     if section is None:
         return {
             "valid": False,
             "reason": "missing sections: Decision or Overall manual result",
-            "failure_class": "malformed_artifact",
+            "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
     checked = len(re.findall(r"^\s*[-*+]\s*\[[xX]\]\s+(Accept|Reject|Needs follow-up)\s*$", section, re.M))
     if checked > 1:
         return {
             "valid": False,
             "reason": "exactly one manual decision checkbox must be checked",
-            "failure_class": "malformed_artifact",
+            "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
     if checked == 1:
         return {"valid": True, "reason": "valid"}
@@ -325,7 +378,7 @@ def validate_manual_test_outcome(text):
     return {
         "valid": False,
         "reason": "manual test notes must state an explicit outcome",
-        "failure_class": "malformed_artifact",
+        "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
     }
 
 
@@ -434,7 +487,7 @@ def useful_partial(text, contract):
 def parse_gate(text):
     match = re.search(r"```ya?ml\s*\n(.*?)\n```", text, re.S | re.I)
     if not match:
-        return {"valid": False, "reason": "missing yaml gate", "failure_class": "malformed_artifact"}
+        return {"valid": False, "reason": "missing yaml gate", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
     gate = {}
     pending_key = None
     pending_items = None
@@ -448,26 +501,26 @@ def parse_gate(text):
         if not raw_line.strip():
             continue
         if has_unquoted_hash(raw_line):
-            return {"valid": False, "reason": "malformed gate syntax", "failure_class": "malformed_artifact"}
+            return {"valid": False, "reason": "malformed gate syntax", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
         line = raw_line.strip()
         if line.startswith("#"):
-            return {"valid": False, "reason": "malformed gate syntax", "failure_class": "malformed_artifact"}
+            return {"valid": False, "reason": "malformed gate syntax", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
         if raw_line[:1].isspace():
             list_match = re.match(r"^(\s+)-\s+(.+?)\s*$", raw_line)
             if not list_match or pending_key is None:
-                return {"valid": False, "reason": "malformed gate syntax", "failure_class": "malformed_artifact"}
+                return {"valid": False, "reason": "malformed gate syntax", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
             indent = len(list_match.group(1).replace("\t", "    "))
             if pending_indent is None:
                 pending_indent = indent
             elif indent != pending_indent:
-                return {"valid": False, "reason": "unsupported gate syntax", "failure_class": "malformed_artifact"}
+                return {"valid": False, "reason": "unsupported gate syntax", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
             parsed = parse_list_item(list_match.group(2).strip())
             if parsed is _INVALID:
-                return {"valid": False, "reason": "unsupported gate syntax", "failure_class": "malformed_artifact"}
+                return {"valid": False, "reason": "unsupported gate syntax", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
             pending_items.append(parsed)
             continue
         if line.startswith("#") or ":" not in line:
-            return {"valid": False, "reason": "malformed gate syntax", "failure_class": "malformed_artifact"}
+            return {"valid": False, "reason": "malformed gate syntax", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
         finish_pending()
         pending_key = None
         pending_items = None
@@ -476,7 +529,7 @@ def parse_gate(text):
         key = key.strip()
         value = value.strip()
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
-            return {"valid": False, "reason": "malformed gate key", "failure_class": "malformed_artifact"}
+            return {"valid": False, "reason": "malformed gate key", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
         if value == "":
             pending_key = key
             pending_items = []
@@ -484,7 +537,7 @@ def parse_gate(text):
             continue
         parsed = parse_scalar_or_array(value)
         if parsed is _INVALID:
-            return {"valid": False, "reason": "unsupported gate syntax", "failure_class": "malformed_artifact"}
+            return {"valid": False, "reason": "unsupported gate syntax", "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT}
         gate[key] = parsed
     finish_pending()
     return {"valid": True, "gate": gate}
@@ -524,23 +577,24 @@ def parse_list_item(value):
     return parse_string(value)
 
 
+_DOUBLE_QUOTED_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"$')
+_SINGLE_QUOTED_RE = re.compile(r"^'((?:[^'\\]|\\.)*)'$")
+_ESCAPE_RE = re.compile(r"\\(.)")
+
+
 def parse_string(value):
     if value == "":
         return ""
-    if value.startswith('"') and value.endswith('"') and value.count('"') == 2:
-        return value[1:-1]
-    if value.startswith("'") and value.endswith("'") and value.count("'") == 2:
-        return value[1:-1]
+    match = _DOUBLE_QUOTED_RE.match(value) or _SINGLE_QUOTED_RE.match(value)
+    if match:
+        return _ESCAPE_RE.sub(r"\1", match.group(1))
     if re.match(r"^[A-Za-z0-9_ ./#:-]+$", value):
         return value
     return _INVALID
 
 
 def is_quoted(value):
-    return (
-        (value.startswith('"') and value.endswith('"') and value.count('"') == 2)
-        or (value.startswith("'") and value.endswith("'") and value.count("'") == 2)
-    )
+    return bool(_DOUBLE_QUOTED_RE.match(value) or _SINGLE_QUOTED_RE.match(value))
 
 
 def has_unquoted_hash(value):

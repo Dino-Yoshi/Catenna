@@ -9,7 +9,7 @@ from pathlib import Path
 
 from agent_pipeline import controller
 from agent_pipeline import usage
-from agent_pipeline.failures import EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION
+from agent_pipeline.failures import EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION, FAILURE_CLASS_MAX_TURNS
 from agent_pipeline.mock_agent import valid_artifact
 from agent_pipeline.state import CONTRACTS, load_state, new_state, orchestrator_dir, write_state_atomic
 
@@ -45,13 +45,16 @@ class RealPipelineTests(unittest.TestCase):
         controller.verification.run_verification = self.original_run_verification
         self.tmp.cleanup()
 
-    def verification_report(self, overall_status="incomplete", coverage_status="no_data"):
-        return {
+    def verification_report(self, overall_status="incomplete", coverage_status="no_data", driven_project_verified=None):
+        report = {
             "schema_version": 1,
             "overall_status": overall_status,
             "checks": [{"name": "unit_tests", "status": "passed" if overall_status == "passed" else "not_attempted"}],
             "test_coverage_delta_signal": {"status": coverage_status},
         }
+        if driven_project_verified is not None:
+            report["driven_project_verified"] = driven_project_verified
+        return report
 
     def config(self, gate_ready=True, max_gate_passes=2):
         return {
@@ -79,6 +82,7 @@ class RealPipelineTests(unittest.TestCase):
             },
             "turn_budgets": {"02": 5, "03": 5, "04": 5, "04_gate": 5, "05": 5, "07": 5, "overseer": 5},
             "gate_ready": gate_ready,
+            "verification": {"driven_project_commands": []},
         }
 
     def write_fake_agent(self):
@@ -115,7 +119,7 @@ class RealPipelineTests(unittest.TestCase):
                     return "\\n".join(out).rstrip() + "\\n"
 
                 if os.environ.get("FAKE_USAGE_LIMIT_ON_SANDBOX") == "1" and "--sandbox" in sys.argv:
-                    sys.stdout.write("usage limit reached for this account\\n")
+                    sys.stderr.write("usage limit reached for this account\\n")
                     sys.exit(1)
 
                 prompt = ""
@@ -162,6 +166,52 @@ class RealPipelineTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
+    def stage_result(self, stage_key, output, failure_class=None, attempt_number=1, run_id="run-test"):
+        runs = orchestrator_dir(self.task_dir) / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        prefix = "%s-pass-1-attempt-%s-codex-%s" % (stage_key, attempt_number, run_id)
+        candidate = runs / (prefix + ".candidate.md")
+        metadata = runs / (prefix + ".json")
+        stdout = runs / (prefix + ".stdout")
+        stderr = runs / (prefix + ".stderr")
+        candidate.write_text(output, encoding="utf-8")
+        metadata.write_text("{}\n", encoding="utf-8")
+        stdout.write_text("", encoding="utf-8")
+        stderr.write_text("", encoding="utf-8")
+        return {
+            "agent": "codex",
+            "provider": "codex",
+            "stage": stage_key,
+            "execution_mode": "read-only",
+            "exit_code": 1 if failure_class else 0,
+            "failure_class": failure_class,
+            "run_id": run_id,
+            "pass_number": 1,
+            "attempt_number": attempt_number,
+            "attempt_kind": "normal",
+            "retry_reason": "initial/no-retry",
+            "candidate_artifact_path": str(candidate),
+            "stdout_path": str(stdout),
+            "stderr_path": str(stderr),
+            "metadata_path": str(metadata),
+            "_source_before": controller.source_snapshot(),
+        }
+
+    def run_stage_with_results(self, state, results, stage_key="02", force=False):
+        calls = []
+        original = controller.invoke_stage
+
+        def fake_invoke(*args, **kwargs):
+            calls.append((args, kwargs))
+            return results.pop(0)
+
+        try:
+            controller.invoke_stage = fake_invoke
+            code = controller.ensure_real_stage(self.task_dir, state, self.config(), stage_key, "read-only", {}, force=force)
+        finally:
+            controller.invoke_stage = original
+        return code, calls
+
     def test_real_pipeline_completes_to_human_checkpoint(self):
         code = controller.pipeline_run(self.task, allow_dirty=True)
 
@@ -174,6 +224,142 @@ class RealPipelineTests(unittest.TestCase):
         self.assertFalse((self.task_dir / CONTRACTS["06"].filename).exists())
         self.assertFalse((self.task_dir / CONTRACTS["07"].filename).exists())
         self.assertFalse((self.task_dir / CONTRACTS["08"].filename).exists())
+
+    def test_real_max_turn_unusable_requests_human_approved_retry(self):
+        state = new_state(self.task, "run-test")
+        output = "# Stage 2 - Technical specification\n\nPartial text without sections.\n"
+
+        code, calls = self.run_stage_with_results(
+            state,
+            [self.stage_result("02", output, FAILURE_CLASS_MAX_TURNS, attempt_number=1)],
+        )
+
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(state["state"], "awaiting_retry_approval")
+        self.assertEqual(state["attempts"]["02_human_approved_retry"], 1)
+        self.assertEqual(state["pending_approval"]["retry_type"], "human_approved_full_stage_retry")
+        self.assertEqual(state["pending_approval"]["failed_attempt_number"], 1)
+        self.assertIn("failed_attempt_metadata_path", state["pending_approval"])
+
+    def test_real_approval_resume_consumes_and_dispatches_owner_once(self):
+        state = new_state(self.task, "run-test")
+        initial = self.stage_result("02", "not useful\n", FAILURE_CLASS_MAX_TURNS, attempt_number=1)
+        code, _calls = self.run_stage_with_results(state, [initial])
+        self.assertEqual(code, EXIT_BLOCKED)
+        write_state_atomic(self.task_dir, state)
+        approval_id = state["pending_approval"]["approval_id"]
+
+        self.assertEqual(controller.approve_retry(self.task, approval_id), EXIT_SUCCESS)
+        approved = load_state(self.task_dir, self.task)
+        self.assertEqual(approved["state"], "awaiting_retry_approval")
+
+        success = self.stage_result("02", valid_artifact("02"), attempt_number=2)
+        code, calls = self.run_stage_with_results(approved, [success])
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(approved.get("pending_approval"))
+        log_text = (orchestrator_dir(self.task_dir) / "log.jsonl").read_text(encoding="utf-8")
+        self.assertIn("approval_granted", log_text)
+        self.assertIn("approval_consumed", log_text)
+
+    def test_real_post_approval_max_turn_blocks_without_second_approval_or_completion_retry(self):
+        state = new_state(self.task, "run-test")
+        initial = self.stage_result("02", "not useful\n", FAILURE_CLASS_MAX_TURNS, attempt_number=1)
+        code, _calls = self.run_stage_with_results(state, [initial])
+        self.assertEqual(code, EXIT_BLOCKED)
+        approval_id = state["pending_approval"]["approval_id"]
+        state["pending_approval"]["approved"] = True
+        state["pending_approval"]["approved_at"] = "now"
+        useful = "# Stage 2 - Technical specification\n\n## Summary\n\nPartial.\n"
+
+        code, calls = self.run_stage_with_results(
+            state,
+            [self.stage_result("02", useful, FAILURE_CLASS_MAX_TURNS, attempt_number=2)],
+        )
+
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(state["state"], "blocked")
+        self.assertEqual(state["pending_approval"]["approval_id"], approval_id)
+        self.assertTrue(state["pending_approval"]["consumed"])
+        self.assertNotIn("02_completion_retry", state["attempts"])
+
+    def test_real_failed_completion_retry_requests_approval_with_audit_metadata(self):
+        state = new_state(self.task, "run-test")
+        useful = "# Stage 2 - Technical specification\n\n## Summary\n\nPartial.\n"
+        completion = "# Stage 2 - Technical specification\n\n## Summary\n\nStill incomplete.\n"
+
+        code, calls = self.run_stage_with_results(
+            state,
+            [
+                self.stage_result("02", useful, FAILURE_CLASS_MAX_TURNS, attempt_number=1),
+                self.stage_result("02", completion, None, attempt_number=2),
+            ],
+        )
+
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertEqual(len(calls), 2)
+        pending = state["pending_approval"]
+        self.assertEqual(pending["retry_type"], "human_approved_full_stage_retry")
+        self.assertEqual(pending["failed_attempt_number"], 1)
+        self.assertEqual(pending["completion_retry_attempt_number"], 2)
+        self.assertIn("failed_attempt_metadata_path", pending)
+        self.assertIn("completion_retry_metadata_path", pending)
+
+    def test_real_non_owner_completed_stage_short_circuits_while_later_approval_pending(self):
+        state = new_state(self.task, "run-test")
+        state["state"] = "awaiting_retry_approval"
+        state["completed_stages"] = ["00", "01", "02"]
+        state["pending_approval"] = {
+            "approval_id": "retry-later",
+            "stage": "03",
+            "approved": False,
+            "consumed": False,
+        }
+
+        code, calls = self.run_stage_with_results(state, [], stage_key="02")
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(calls, [])
+        self.assertEqual(state["pending_approval"]["stage"], "03")
+
+    def test_real_owner_completed_approved_pending_approval_is_consumed_and_cleared(self):
+        state = new_state(self.task, "run-test")
+        state["state"] = "awaiting_retry_approval"
+        state["completed_stages"] = ["00", "01", "02"]
+        state["pending_approval"] = {
+            "approval_id": "retry-owner",
+            "stage": "02",
+            "approved": True,
+            "consumed": False,
+        }
+
+        code, calls = self.run_stage_with_results(state, [], stage_key="02")
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(calls, [])
+        self.assertIsNone(state.get("pending_approval"))
+        log_text = (orchestrator_dir(self.task_dir) / "log.jsonl").read_text(encoding="utf-8")
+        self.assertIn("approval_consumed", log_text)
+
+    def test_real_owner_completed_unapproved_pending_approval_blocks_without_clearing(self):
+        state = new_state(self.task, "run-test")
+        state["state"] = "awaiting_retry_approval"
+        state["completed_stages"] = ["00", "01", "02"]
+        state["pending_approval"] = {
+            "approval_id": "retry-owner",
+            "stage": "02",
+            "approved": False,
+            "consumed": False,
+        }
+
+        code, calls = self.run_stage_with_results(state, [], stage_key="02")
+
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertEqual(calls, [])
+        self.assertEqual(state["pending_approval"]["approval_id"], "retry-owner")
 
     def test_rejected_stage4_gate_stops_before_stage5(self):
         os.environ["FAKE_GATE_REJECT"] = "1"
@@ -343,28 +529,38 @@ class RealPipelineTests(unittest.TestCase):
         self.assertFalse((self.task_dir / CONTRACTS["06"].filename).exists())
 
     def test_failed_or_flagged_evidence_does_not_trigger_auto_verified(self):
-        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="failed")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="failed", driven_project_verified=True)
         code = controller.pipeline_run(self.task, allow_dirty=True)
         self.assertEqual(code, EXIT_BLOCKED)
         self.assertEqual(load_state(self.task_dir, self.task)["state"], "awaiting_human_test")
 
         self.setUp_for_second_task()
-        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="flagged")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="flagged", driven_project_verified=True)
         code = controller.pipeline_run(self.task, allow_dirty=True)
         self.assertEqual(code, EXIT_BLOCKED)
         self.assertEqual(load_state(self.task_dir, self.task)["state"], "awaiting_human_test")
 
-    def setUp_for_second_task(self):
+        self.setUp_for_second_task("real-fixture-3")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="ok")
+        code = controller.pipeline_run(self.task, allow_dirty=True)
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertEqual(load_state(self.task_dir, self.task)["state"], "awaiting_human_test")
+
+    def setUp_for_second_task(self, task="real-fixture-2"):
         # Reset just enough state to run pipeline_run again from scratch
         # against a fresh task directory within the same test method.
-        self.task = "real-fixture-2"
+        self.task = task
         self.task_dir = self.root / self.task
         self.task_dir.mkdir(parents=True)
         (self.task_dir / CONTRACTS["00"].filename).write_text(valid_artifact("00"), encoding="utf-8")
         (self.task_dir / CONTRACTS["01"].filename).write_text(valid_artifact("01"), encoding="utf-8")
 
     def test_auto_verified_path_drives_stage_06_through_08_in_one_call(self):
-        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="ok")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(
+            overall_status="passed",
+            coverage_status="ok",
+            driven_project_verified=True,
+        )
 
         code = controller.pipeline_run(self.task, allow_dirty=True)
 
@@ -420,7 +616,11 @@ class RealPipelineTests(unittest.TestCase):
         self.assertIn("diff review verdict (needs_followup)", stage08)
 
     def test_resumed_pipeline_run_on_complete_task_is_a_pure_noop(self):
-        controller.verification.run_verification = lambda *a, **k: self.verification_report(overall_status="passed", coverage_status="ok")
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(
+            overall_status="passed",
+            coverage_status="ok",
+            driven_project_verified=True,
+        )
         controller.pipeline_run(self.task, allow_dirty=True)
         count_path = self.root / "counts.txt"
         os.environ["FAKE_COUNT_PATH"] = str(count_path)

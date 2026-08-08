@@ -22,6 +22,31 @@ class ArtifactValidationTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertIn("Files changed", result["reason"])
 
+    def test_required_sections_need_body_content(self):
+        text = "# Stage 5 - Implementation report\n\n" + "\n\n".join(
+            "## " + section for section in CONTRACTS["05"].sections
+        ) + "\n"
+
+        result = validate_text(text, CONTRACTS["05"])
+
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "section has no body content: Summary of changes")
+
+    def test_required_section_body_can_be_terse(self):
+        text = valid_artifact("05").replace("Mock content for Deviations from brief.", "None.")
+
+        result = validate_text(text, CONTRACTS["05"])
+
+        self.assertTrue(result["valid"], result)
+
+    def test_required_section_whitespace_only_body_is_rejected(self):
+        text = valid_artifact("05").replace("Mock content for Files changed.", "   \n\t")
+
+        result = validate_text(text, CONTRACTS["05"])
+
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "section has no body content: Files changed")
+
     def test_yaml_gate_validates_required_keys_and_types(self):
         self.assertTrue(validate_text(valid_artifact("03"), CONTRACTS["03"])["valid"])
 
@@ -38,6 +63,20 @@ class ArtifactValidationTests(unittest.TestCase):
         )
         self.assertFalse(missing["valid"])
         self.assertEqual(missing["reason"], "missing gate key: required_revision_targets")
+
+    def test_yaml_gate_rejects_ready_with_blocking_issues(self):
+        gate_body = (
+            "ready_for_implementation: true\n"
+            "blocking_issues:\n"
+            "  - blocker\n"
+            "nonblocking_issues: []\n"
+            "required_revision_targets: []"
+        )
+
+        for stage_key in ("03", "04_gate"):
+            result = validate_text(gate_artifact(stage_key, gate_body), CONTRACTS[stage_key])
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["reason"], "ready_for_implementation is true but blocking_issues is non-empty")
 
     def test_stage_6_requires_explicit_manual_outcome(self):
         heading_only = manual_notes("Decision", "")
@@ -58,6 +97,12 @@ class ArtifactValidationTests(unittest.TestCase):
 
         self.assertTrue(validate_text(star, CONTRACTS["06"])["valid"])
         self.assertTrue(validate_text(plus, CONTRACTS["06"])["valid"])
+
+    def test_stage_6_result_heading_body_is_required_for_both_variants(self):
+        for heading in ("Decision", "Overall manual result"):
+            result = validate_text(manual_notes(heading, "  \n\t"), CONTRACTS["06"])
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["reason"], "section has no body content: Decision or Overall manual result")
 
     def test_stage_6_rejects_duplicate_checked_outcome_lines(self):
         text = manual_notes("Decision", "- [x] Accept\n* [X] Accept\n+ [ ] Reject")
@@ -107,7 +152,7 @@ class ArtifactValidationTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertEqual(result["reason"], "manual test notes must state an explicit outcome")
 
-    def test_yaml_gate_accepts_multiline_arrays(self):
+    def test_yaml_gate_parses_multiline_arrays_before_contradiction_check(self):
         text = gate_artifact(
             "03",
             "\n".join(
@@ -123,10 +168,30 @@ class ArtifactValidationTests(unittest.TestCase):
         )
 
         result = validate_text(text, CONTRACTS["03"])
-        self.assertTrue(result["valid"])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "ready_for_implementation is true but blocking_issues is non-empty")
         gate = parse_gate(text)["gate"]
         self.assertEqual(gate["blocking_issues"], ["B1: quoted text, with comma", "bare_identifier"])
         self.assertEqual(gate["nonblocking_issues"], [])
+
+    def test_yaml_gate_accepts_escaped_quotes_in_list_items(self):
+        text = gate_artifact(
+            "03",
+            "\n".join(
+                [
+                    "ready_for_implementation: true",
+                    "blocking_issues: []",
+                    "nonblocking_issues:",
+                    '  - "the value is \\"05\\" here, at file.py:12-19; note it."',
+                    "required_revision_targets: []",
+                ]
+            ),
+        )
+
+        result = validate_text(text, CONTRACTS["03"])
+        self.assertTrue(result["valid"], result)
+        gate = parse_gate(text)["gate"]
+        self.assertEqual(gate["nonblocking_issues"], ['the value is "05" here, at file.py:12-19; note it.'])
 
     def test_yaml_gate_rejects_orphan_and_nested_list_syntax(self):
         orphan = gate_artifact(

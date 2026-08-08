@@ -5,7 +5,9 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from agent_pipeline import real_runner
 from agent_pipeline.real_runner import invoke_agent
 
 
@@ -212,6 +214,91 @@ class StreamingRunnerTests(unittest.TestCase):
 
         self.assertIsNone(result.get("failure_class"))
         self.assertFalse((self.root / "usage").exists())
+
+    def test_missing_provider_command_reports_not_invoked(self):
+        config = self.base_config("claude", self.root / "missing-cli")
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-claude-run-missing.candidate.md"
+        result = invoke_agent(self.task_dir, config, "claude", "04", "read-only", self.prompt_path, candidate_path, "run-missing")
+
+        self.assertEqual(result["failure_class"], "source_failure")
+        self.assertFalse(result["real_process_invoked"])
+
+    def test_nonzero_exit_after_launch_reports_invoked(self):
+        fake = self.write_fake(
+            """
+            import sys
+            print("failed after launch")
+            sys.exit(7)
+            """
+        )
+        config = self.base_config("claude", fake)
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-claude-run-nonzero.candidate.md"
+        result = invoke_agent(self.task_dir, config, "claude", "04", "read-only", self.prompt_path, candidate_path, "run-nonzero")
+
+        self.assertEqual(result["exit_code"], 7)
+        self.assertEqual(result["failure_class"], "unknown_failure")
+        self.assertTrue(result["real_process_invoked"])
+
+    def test_timeout_after_launch_reports_invoked(self):
+        fake = self.write_fake(
+            """
+            import time
+            time.sleep(5)
+            """
+        )
+        config = self.base_config("claude", fake)
+        config["timeout_seconds"] = 1
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-claude-run-timeout.candidate.md"
+        result = invoke_agent(self.task_dir, config, "claude", "04", "read-only", self.prompt_path, candidate_path, "run-timeout")
+
+        self.assertEqual(result["failure_class"], "timeout")
+        self.assertTrue(result["real_process_invoked"])
+
+    def test_prompt_read_failure_reports_not_invoked(self):
+        fake = self.write_fake("print('should not run')\n")
+        config = self.base_config("codex", fake)
+        missing_prompt = self.root / "missing-prompt.txt"
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-codex-run-prompt.candidate.md"
+        result = invoke_agent(self.task_dir, config, "codex", "04", "read-only", missing_prompt, candidate_path, "run-prompt")
+
+        self.assertEqual(result["failure_class"], "permission_error")
+        self.assertFalse(result["real_process_invoked"])
+
+    def test_popen_oserror_reports_not_invoked(self):
+        fake = self.write_fake("print('should not run')\n")
+        config = self.base_config("claude", fake)
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-claude-run-oserror.candidate.md"
+
+        with mock.patch.object(real_runner.subprocess, "Popen", side_effect=OSError("launch failed")):
+            result = invoke_agent(self.task_dir, config, "claude", "04", "read-only", self.prompt_path, candidate_path, "run-oserror")
+
+        self.assertEqual(result["failure_class"], "permission_error")
+        self.assertFalse(result["real_process_invoked"])
+
+    def test_stdout_is_parsed_once_for_result_extraction(self):
+        fake = self.write_fake(
+            """
+            print('{"type":"system","subtype":"init"}')
+            print('{"type":"result","subtype":"success","is_error":false,"result":"ok"}')
+            """
+        )
+        config = self.base_config("claude", fake)
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-claude-run-parse.candidate.md"
+        original = __import__("agent_pipeline.stream_events", fromlist=["parse_json_lines"]).parse_json_lines
+        calls = []
+
+        def counted(stdout_text):
+            calls.append(stdout_text)
+            return original(stdout_text)
+
+        from agent_pipeline import stream_events
+        stream_events.parse_json_lines = counted
+        self.addCleanup(lambda: setattr(stream_events, "parse_json_lines", original))
+
+        result = invoke_agent(self.task_dir, config, "claude", "04", "read-only", self.prompt_path, candidate_path, "run-parse")
+
+        self.assertIsNone(result["failure_class"])
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

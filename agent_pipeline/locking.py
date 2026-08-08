@@ -22,10 +22,15 @@ def lock_path(task_dir):
 
 def pid_live(pid):
     try:
-        os.kill(int(pid), 0)
+        parsed = int(pid)
+        if parsed < 1:
+            return None
+        os.kill(parsed, 0)
         return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
     except Exception:
         return None
 
@@ -52,7 +57,10 @@ class TaskLock(object):
             "run_id": self.run_id,
         }
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        fd = os.open(str(self.path), flags, 0o644)
+        try:
+            fd = os.open(str(self.path), flags, 0o644)
+        except FileExistsError:
+            self._raise_existing()
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")

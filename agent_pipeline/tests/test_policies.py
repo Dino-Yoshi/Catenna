@@ -52,6 +52,15 @@ class PolicyAndFailureTests(unittest.TestCase):
         self.assertEqual(state["pending_approval"]["stage"], "02")
         self.assertTrue(list((orchestrator_dir(task_dir) / "failed").glob("02-*")))
 
+    def test_retry_approval_default_type_remains_mock_compatible(self):
+        state = new_state("policy-test", "run-test")
+
+        controller.require_retry_approval(state, "02", "max_turns", "codex", "unusable max-turn output")
+
+        self.assertEqual(state["pending_approval"]["retry_type"], "temporary_full_retry")
+        self.assertNotIn("failed_attempt_metadata_path", state["pending_approval"])
+        self.assertNotIn("completion_retry_metadata_path", state["pending_approval"])
+
     def test_rate_limit_without_reset_blocks(self):
         self.assert_blocks_stage_02({"actions": {"02": "rate_limit_no_reset"}}, "rate_limit")
 

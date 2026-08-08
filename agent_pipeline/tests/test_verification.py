@@ -208,6 +208,18 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def set_env(self, name, value):
+        original = os.environ.get(name)
+        had_original = name in os.environ
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+        if had_original:
+            self.addCleanup(lambda: os.environ.__setitem__(name, original))
+        else:
+            self.addCleanup(lambda: os.environ.pop(name, None))
+
     def write_fake_gradlew(self, body):
         path = self.repo_root / "gradlew"
         path.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(body), encoding="utf-8")
@@ -226,7 +238,9 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["exit_code"], 0)
 
-    def test_sets_java_home_and_gradle_user_home_env(self):
+    def test_sets_default_java_home_and_gradle_user_home_env(self):
+        self.set_env("JAVA_HOME", None)
+        self.set_env(verification.GRADLE_JAVA_HOME_FALLBACK_ENV, None)
         self.write_fake_gradlew(
             """
             import os
@@ -235,6 +249,48 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
             """
         )
         result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+        self.assertEqual(result["status"], "passed")
+
+    def test_preserves_non_empty_caller_java_home(self):
+        self.set_env("JAVA_HOME", "/caller/java")
+        self.set_env(verification.GRADLE_JAVA_HOME_FALLBACK_ENV, "/fallback/java")
+        self.write_fake_gradlew(
+            """
+            import os
+            assert os.environ.get("JAVA_HOME") == "/caller/java"
+            """
+        )
+        result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+        self.assertEqual(result["status"], "passed")
+
+    def test_empty_caller_java_home_uses_configurable_fallback(self):
+        self.set_env("JAVA_HOME", "")
+        self.set_env(verification.GRADLE_JAVA_HOME_FALLBACK_ENV, "/fallback/java")
+        self.write_fake_gradlew(
+            """
+            import os
+            assert os.environ.get("JAVA_HOME") == "/fallback/java"
+            """
+        )
+        result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+        self.assertEqual(result["status"], "passed")
+
+    def test_env_overrides_win_over_generated_gradle_env(self):
+        self.set_env("JAVA_HOME", "/caller/java")
+        self.set_env(verification.GRADLE_JAVA_HOME_FALLBACK_ENV, "/fallback/java")
+        self.write_fake_gradlew(
+            """
+            import os
+            assert os.environ.get("JAVA_HOME") == "/override/java"
+            assert os.environ.get("GRADLE_USER_HOME") == "/override/gradle"
+            """
+        )
+        result = verification.run_gradle(
+            self.repo_root,
+            self.runs_dir,
+            "compileJava",
+            env_overrides={"JAVA_HOME": "/override/java", "GRADLE_USER_HOME": "/override/gradle"},
+        )
         self.assertEqual(result["status"], "passed")
 
     def test_nonzero_exit_is_failed_status(self):
@@ -251,6 +307,90 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
     def test_missing_gradlew_is_not_attempted(self):
         result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
         self.assertEqual(result["status"], "not_attempted")
+
+
+class DrivenProjectChecksTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo_root = Path(self.tmp.name) / "repo"
+        self.repo_root.mkdir(parents=True)
+        self.runs_dir = Path(self.tmp.name) / "runs"
+        self.runs_dir.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_script(self, name, body):
+        path = self.repo_root / name
+        path.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(body), encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def test_no_commands_returns_no_checks(self):
+        self.assertEqual(verification.run_driven_project_checks(self.repo_root, self.runs_dir, []), [])
+
+    def test_passing_command_runs_from_repo_root_with_copied_argv(self):
+        script = self.write_script(
+            "check.py",
+            """
+            import os
+            import sys
+            assert os.getcwd() == sys.argv[1]
+            sys.stdout.write("ok")
+            """,
+        )
+        argv = [str(script), str(self.repo_root)]
+        command = {"name": "unit", "argv": argv}
+
+        checks = verification.run_driven_project_checks(self.repo_root, self.runs_dir, [command])
+
+        self.assertEqual(command["argv"], argv)
+        self.assertEqual(len(checks), 1)
+        check = checks[0]
+        self.assertEqual(check["name"], "driven_project_unit")
+        self.assertEqual(check["status"], "passed")
+        self.assertEqual(check["exit_code"], 0)
+        self.assertFalse(check["timed_out"])
+        self.assertEqual(check["command"], argv)
+        self.assertEqual(Path(check["stdout_path"]).read_text(encoding="utf-8"), "ok")
+
+    def test_nonzero_exit_fails(self):
+        script = self.write_script("fail.py", "import sys\nsys.exit(7)\n")
+        check = verification.run_driven_project_checks(self.repo_root, self.runs_dir, [{"name": "fail", "argv": [str(script)]}])[0]
+        self.assertEqual(check["status"], "failed")
+        self.assertEqual(check["exit_code"], 7)
+        self.assertFalse(check["timed_out"])
+
+    def test_omitted_timeout_defaults_to_600_seconds(self):
+        seen = {}
+        original = verification.run_to_files
+
+        def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=None):
+            seen["timeout_seconds"] = timeout_seconds
+            seen["cwd"] = cwd
+            Path(stdout_path).write_text("", encoding="utf-8")
+            Path(stderr_path).write_text("", encoding="utf-8")
+            return 0, False
+
+        verification.run_to_files = fake_run_to_files
+        self.addCleanup(lambda: setattr(verification, "run_to_files", original))
+
+        verification.run_driven_project_checks(self.repo_root, self.runs_dir, [{"name": "default-timeout", "argv": ["true"]}])
+
+        self.assertEqual(seen["timeout_seconds"], 600)
+        self.assertEqual(seen["cwd"], self.repo_root)
+
+    def test_missing_executable_fails_without_crashing_and_writes_evidence(self):
+        check = verification.run_driven_project_checks(
+            self.repo_root,
+            self.runs_dir,
+            [{"name": "missing", "argv": [str(self.repo_root / "missing-command")]}],
+        )[0]
+        self.assertEqual(check["status"], "failed")
+        self.assertEqual(check["exit_code"], verification.DRIVEN_PROJECT_LAUNCH_FAILURE_EXIT_CODE)
+        self.assertFalse(check["timed_out"])
+        self.assertEqual(Path(check["stdout_path"]).read_text(encoding="utf-8"), "")
+        self.assertTrue(Path(check["stderr_path"]).read_text(encoding="utf-8"))
 
 
 class RunUnitTestsAndMockPipelineIntegrationTests(unittest.TestCase):
@@ -326,6 +466,7 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
         report = verification.run_verification(self.task_dir, self.repo_root)
 
         self.assertEqual(report["overall_status"], "passed")
+        self.assertFalse(report["driven_project_verified"])
         self.assertTrue(report["manifest_present"])
         self.assertTrue(report["manifest_updated"])
         self.assertEqual(report["test_coverage_delta_signal"]["status"], "flagged")
@@ -336,6 +477,8 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
         self.assertTrue(md_path.exists())
         on_disk = json.loads(json_path.read_text(encoding="utf-8"))
         self.assertEqual(on_disk["overall_status"], "passed")
+        self.assertFalse(on_disk["driven_project_verified"])
+        self.assertIn("Driven-project verified: **false**", md_path.read_text(encoding="utf-8"))
 
         updated_manifest = json.loads((self.task_dir / "05_implementation_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(updated_manifest["verification"]["unit_tests"], "passed")
@@ -346,7 +489,23 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
         report = verification.run_verification(self.task_dir, self.repo_root)
         self.assertFalse(report["manifest_present"])
         self.assertFalse(report["manifest_updated"])
+        self.assertFalse(report["driven_project_verified"])
         self.assertEqual(report["test_coverage_delta_signal"]["status"], "no_data")
+
+    def test_configured_driven_project_commands_affect_report_status(self):
+        passing = self.repo_root / "passing.py"
+        passing.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        passing.chmod(0o755)
+
+        report = verification.run_verification(
+            self.task_dir,
+            self.repo_root,
+            driven_project_commands=[{"name": "acceptance", "argv": [str(passing)]}],
+        )
+
+        self.assertEqual(report["overall_status"], "passed")
+        self.assertTrue(report["driven_project_verified"])
+        self.assertIn("driven_project_acceptance", [check["name"] for check in report["checks"]])
 
     def test_concurrency_guard_blocks_run_verification(self):
         directory = orchestrator_dir(self.task_dir)

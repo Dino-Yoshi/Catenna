@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import json
 import os
+import re
 import shutil
 import socket
 import time
@@ -12,7 +13,30 @@ from pathlib import Path
 
 from .artifacts import CONTRACTS, manual_test_decision, parse_gate, sha256_file, useful_partial, validate_file, validate_text
 from .config import ConfigError, configured_candidates, agent_config, load_config
-from .failures import BANNED_COMMAND_WORDS, EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_INTERRUPTED, EXIT_LOCKED, EXIT_SUCCESS, EXIT_VALIDATION
+from .failures import (
+    BANNED_COMMAND_WORDS,
+    EXIT_BAD_INPUT,
+    EXIT_BLOCKED,
+    EXIT_INTERRUPTED,
+    EXIT_LOCKED,
+    EXIT_SUCCESS,
+    EXIT_VALIDATION,
+    FAILURE_CLASS_EMPTY_OUTPUT,
+    FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED,
+    FAILURE_CLASS_GATE_REJECTED,
+    FAILURE_CLASS_MALFORMED_ARTIFACT,
+    FAILURE_CLASS_MALFORMED_OVERSEER,
+    FAILURE_CLASS_MAX_TURNS,
+    FAILURE_CLASS_PERMISSION_ERROR,
+    FAILURE_CLASS_PROCESS_INTERRUPTED,
+    FAILURE_CLASS_RATE_LIMIT,
+    FAILURE_CLASS_SANDBOX_ENVIRONMENT,
+    FAILURE_CLASS_SOURCE_FAILURE,
+    FAILURE_CLASS_STAGE5_AMBIGUITY,
+    FAILURE_CLASS_TIMEOUT,
+    FAILURE_CLASS_UNKNOWN_FAILURE,
+    FAILURE_CLASS_USAGE_LIMIT,
+)
 from .locking import LockError, TaskLock, explicit_unlock
 from .mock_agent import MockAgent, valid_artifact
 from .manifest import capture_dirty_baseline, git_status, validate_manifest, write_manifest
@@ -54,8 +78,24 @@ class ControllerError(Exception):
         self.exit_code = exit_code
 
 
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def validate_task_id(task):
+    if not isinstance(task, str) or not TASK_ID_RE.match(task):
+        raise ControllerError("invalid task id: %r" % (task,), EXIT_BAD_INPUT)
+    return task
+
+
 def task_dir_for(task):
-    return TASKS_ROOT / task
+    task = validate_task_id(task)
+    root = TASKS_ROOT.resolve()
+    candidate = (TASKS_ROOT / task).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ControllerError("invalid task id: %r" % (task,), EXIT_BAD_INPUT)
+    return candidate
 
 
 def load_scenarios():
@@ -160,7 +200,17 @@ def pipeline_brief(task, stage=None, run_id=None):
 def pipeline_verify(task, run_build=False):
     task_dir = task_dir_for(task)
     try:
-        report = verification.run_verification(task_dir, REPO_ROOT, run_build=run_build)
+        config = load_config()
+    except ConfigError as exc:
+        print("invalid real-run config: %s" % exc)
+        return EXIT_VALIDATION
+    try:
+        report = verification.run_verification(
+            task_dir,
+            REPO_ROOT,
+            run_build=run_build,
+            driven_project_commands=config.get("verification", {}).get("driven_project_commands", []),
+        )
     except verification.VerificationError as exc:
         print(str(exc))
         return EXIT_LOCKED
@@ -168,7 +218,10 @@ def pipeline_verify(task, run_build=False):
     print("overall_status: %s" % report["overall_status"])
     for check in report["checks"]:
         if "exit_code" in check:
-            print("  %s: %s (exit=%s, %.1fs)" % (check["name"], check["status"], check["exit_code"], check.get("duration_seconds", 0.0)))
+            duration_seconds = check.get("duration_seconds")
+            if duration_seconds is None:
+                duration_seconds = 0.0
+            print("  %s: %s (exit=%s, %.1fs)" % (check["name"], check["status"], check["exit_code"], duration_seconds))
         else:
             print("  %s: %s (%s)" % (check["name"], check["status"], check.get("reason", "")))
     signal = report["test_coverage_delta_signal"]
@@ -246,7 +299,6 @@ def approve_retry(task, approval_id):
                 return EXIT_BAD_INPUT
             pending["approved"] = True
             pending["approved_at"] = now()
-            state["state"] = "ready"
             append_log(task_dir, {"event": "approval_granted", "approval_id": approval_id, "run_id": run_id})
             write_state_atomic(task_dir, state)
             print("approval granted: %s" % approval_id)
@@ -322,6 +374,7 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
     for seed_stage in ("00", "01"):
         validation = validate_file(task_dir / CONTRACTS[seed_stage].filename, seed_stage, read_only=True)
         if not validation["valid"]:
+            state["completed_stages"] = []
             block_transition(task_dir, state, seed_stage, "Stage %s is missing or invalid: %s" % (seed_stage, validation["reason"]), validation.get("failure_class"))
             return EXIT_BLOCKED
 
@@ -341,13 +394,13 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
 
     gate = accepted_stage4_gate(task_dir)
     if not gate["accepted"]:
-        block_transition(task_dir, state, "04_gate", gate["reason"], "malformed_artifact", completed_through="04")
+        block_transition(task_dir, state, "04_gate", gate["reason"], FAILURE_CLASS_MALFORMED_ARTIFACT, completed_through="04")
         return EXIT_BLOCKED
 
     stage5_current_run = False
     if "05" not in state.get("completed_stages", []):
         if not allow_dirty and git_status(REPO_ROOT):
-            block_transition(task_dir, state, "05", "Source working tree is not clean outside .agent-pipeline; rerun with ALLOW_DIRTY=1 if intentional", "source_failure")
+            block_transition(task_dir, state, "05", "Source working tree is not clean outside .agent-pipeline; rerun with ALLOW_DIRTY=1 if intentional", FAILURE_CLASS_SOURCE_FAILURE)
             return EXIT_BLOCKED
         baseline = capture_dirty_baseline(REPO_ROOT)
         state["dirty_baseline"] = baseline
@@ -362,23 +415,24 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
     reconcile_artifacts(task_dir, state, read_only=False)
     if stage5_current_run:
         clamp_completed_prefix(state, "05")
+        write_state_atomic(task_dir, state)
 
     if "06" not in state.get("completed_stages", []):
         report_check = stage5_report_provenance(task_dir, state)
         append_log(task_dir, {"event": "artifact_validation", "stage": "05", "valid": report_check["valid"], "classification": report_check.get("failure_class"), "run_id": state.get("run_id")})
         if not report_check["valid"]:
-            block_transition(task_dir, state, "05", report_check["reason"], report_check.get("failure_class", "stage5_ambiguity"), completed_through="04_gate")
+            block_transition(task_dir, state, "05", report_check["reason"], report_check.get("failure_class", FAILURE_CLASS_STAGE5_AMBIGUITY), completed_through="04_gate")
             return EXIT_BLOCKED
 
         post_check = stage5_postprocessing_complete(task_dir, state)
         if post_check["valid"] and not stage5_current_run:
-            block_transition(task_dir, state, "05", "Stage 5 post-processing already exists but was not produced by this controller run; no adoption path is configured", "stage5_ambiguity", completed_through="04_gate")
+            block_transition(task_dir, state, "05", "Stage 5 post-processing already exists but was not produced by this controller run; no adoption path is configured", FAILURE_CLASS_STAGE5_AMBIGUITY, completed_through="04_gate")
             return EXIT_BLOCKED
         if not stage5_current_run:
             reason = post_check["reason"]
             if not any_stage5_postprocessing_present(task_dir, state):
                 reason = "Pre-existing Stage 5 report/provenance has no complete post-processing and no adoption path is configured"
-            block_transition(task_dir, state, "05", reason, post_check.get("failure_class", "stage5_ambiguity"), completed_through="04_gate")
+            block_transition(task_dir, state, "05", reason, post_check.get("failure_class", FAILURE_CLASS_STAGE5_AMBIGUITY), completed_through="04_gate")
             return EXIT_BLOCKED
 
         try:
@@ -386,12 +440,17 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
             report_check["run"]["dirty_changed_files"] = manifest.get("changed_files", [])
             append_log(task_dir, {"event": "manifest_generation", "stage": "05", "run_id": state.get("run_id"), "path": str(task_dir / "05_implementation_manifest.json")})
         except Exception as exc:
-            block_transition(task_dir, state, "05", "Stage 5 manifest is structurally invalid: " + str(exc), "malformed_artifact", completed_through="04_gate")
+            block_transition(task_dir, state, "05", "Stage 5 manifest is structurally invalid: " + str(exc), FAILURE_CLASS_MALFORMED_ARTIFACT, completed_through="04_gate")
             return EXIT_BLOCKED
 
         verification_report = None
         try:
-            verification_report = verification.run_verification(task_dir, REPO_ROOT, allow_pid=os.getpid())
+            verification_report = verification.run_verification(
+                task_dir,
+                REPO_ROOT,
+                allow_pid=os.getpid(),
+                driven_project_commands=config.get("verification", {}).get("driven_project_commands", []),
+            )
         except verification.VerificationError as exc:
             append_log(task_dir, {"event": "verification_error", "stage": "05", "reason": str(exc), "run_id": state.get("run_id")})
 
@@ -433,18 +492,19 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
 
 
 def run_stage4_gate_loop(task_dir, state, config, assignments):
-    if "04_gate" in state.get("completed_stages", []):
+    if "04_gate" in state.get("completed_stages", []) and accepted_stage4_gate(task_dir)["accepted"]:
         return EXIT_SUCCESS
     max_passes = int(config.get("max_gate_passes", 2))
     pass_number = len(state.get("stage_gate_passes") or []) + 1
-    force_brief = "04" not in state.get("completed_stages", [])
-    force_audit = "04_gate" not in state.get("completed_stages", [])
+    force_brief = pass_number > 1 or "04" not in state.get("completed_stages", [])
+    force_audit = pass_number > 1 or "04_gate" not in state.get("completed_stages", [])
     previous_rejection = None
     while pass_number <= max_passes:
         code = ensure_real_stage(task_dir, state, config, "04", "read-only", assignments, pass_number=pass_number, force=force_brief)
         if code != EXIT_SUCCESS:
             return code
         reconcile_artifacts(task_dir, state, read_only=False)
+        archive_stage4_brief_pass(task_dir, pass_number)
         if previous_rejection:
             new_brief_hash = sha256_file(task_dir / CONTRACTS["04"].filename)
             current_audit_hash = sha256_file(task_dir / CONTRACTS["04_gate"].filename) if (task_dir / CONTRACTS["04_gate"].filename).exists() else None
@@ -454,7 +514,7 @@ def run_stage4_gate_loop(task_dir, state, config, assignments):
                     state,
                     "04_gate",
                     "Stage 4 revision output is identical to a previously rejected brief with unchanged audit feedback",
-                    "gate_rejected",
+                    FAILURE_CLASS_GATE_REJECTED,
                     completed_through="04",
                 )
                 return EXIT_BLOCKED
@@ -469,29 +529,48 @@ def run_stage4_gate_loop(task_dir, state, config, assignments):
         if gate["accepted"]:
             return EXIT_SUCCESS
         if not gate.get("valid"):
-            block_transition(task_dir, state, "04_gate", gate["reason"], "malformed_artifact", completed_through="04")
+            block_transition(task_dir, state, "04_gate", gate["reason"], FAILURE_CLASS_MALFORMED_ARTIFACT, completed_through="04")
             return EXIT_BLOCKED
         if pass_number >= max_passes:
-            append_log(task_dir, {"event": "stage4_pass_exhaustion", "stage": "04_gate", "pass": pass_number, "classification": "gate_pass_limit_exhausted", "run_id": state.get("run_id")})
-            block_transition(task_dir, state, "04_gate", "Stage 4 gate remains rejected after %d bounded pass(es)" % max_passes, "gate_pass_limit_exhausted", completed_through="04")
+            append_log(task_dir, {"event": "stage4_pass_exhaustion", "stage": "04_gate", "pass": pass_number, "classification": FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED, "run_id": state.get("run_id")})
+            block_transition(task_dir, state, "04_gate", "Stage 4 gate remains rejected after %d bounded pass(es)" % max_passes, FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED, completed_through="04")
             return EXIT_BLOCKED
 
         previous_rejection = {
             "brief_hash": sha256_file(task_dir / CONTRACTS["04"].filename),
             "audit_hash": sha256_file(task_dir / CONTRACTS["04_gate"].filename),
         }
-        append_log(task_dir, {"event": "retry_scheduled", "stage": "04", "pass": pass_number + 1, "classification": "gate_rejected", "run_id": state.get("run_id")})
+        append_log(task_dir, {"event": "retry_scheduled", "stage": "04", "pass": pass_number + 1, "classification": FAILURE_CLASS_GATE_REJECTED, "run_id": state.get("run_id")})
         force_brief = True
         pass_number += 1
         force_audit = True
-    append_log(task_dir, {"event": "stage4_pass_exhaustion", "stage": "04_gate", "pass": pass_number - 1, "classification": "gate_pass_limit_exhausted", "run_id": state.get("run_id")})
-    block_transition(task_dir, state, "04_gate", "Stage 4 gate pass limit exhausted", "gate_pass_limit_exhausted", completed_through="04")
+    append_log(task_dir, {"event": "stage4_pass_exhaustion", "stage": "04_gate", "pass": pass_number - 1, "classification": FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED, "run_id": state.get("run_id")})
+    block_transition(task_dir, state, "04_gate", "Stage 4 gate pass limit exhausted", FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED, completed_through="04")
     return EXIT_BLOCKED
 
 
 def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assignments, pass_number=1, force=False):
-    if not force and stage_key in state.get("completed_stages", []):
-        return EXIT_SUCCESS
+    pending = state.get("pending_approval") or {}
+    awaiting_retry_approval = state.get("state") == "awaiting_retry_approval"
+    completed = stage_key in state.get("completed_stages", [])
+    if not awaiting_retry_approval:
+        if not force and completed:
+            return EXIT_SUCCESS
+    elif pending.get("stage") != stage_key:
+        if completed and not force:
+            return EXIT_SUCCESS
+        return EXIT_BLOCKED
+    else:
+        if not pending.get("approved") or pending.get("consumed"):
+            return EXIT_BLOCKED
+        if completed:
+            consume_approved_retry_if_present(state, stage_key)
+            append_log(task_dir, {"event": "approval_consumed", "stage": stage_key, "run_id": state.get("run_id")})
+            state["pending_approval"] = None
+            return EXIT_SUCCESS
+        consume_approved_retry_if_present(state, stage_key)
+        append_log(task_dir, {"event": "approval_consumed", "stage": stage_key, "run_id": state.get("run_id")})
+        state["state"] = "running"
     attempt_budget = int(config.get("stage_attempt_budget", 2))
     attempts = 0
     next_attempt_kind = "normal"
@@ -499,7 +578,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
     while attempts < attempt_budget:
         route = choose_real_agent(stage_key, state, config, assignments, execution_mode)
         if not route:
-            block_transition(task_dir, state, stage_key, "no configured capable runner exists for required role/mode", "source_failure")
+            block_transition(task_dir, state, stage_key, "no configured capable runner exists for required role/mode", FAILURE_CLASS_SOURCE_FAILURE)
             return EXIT_BLOCKED
         agent = route["agent"]
         if route.get("fallback") or route.get("degraded"):
@@ -527,7 +606,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             source_after = source_snapshot()
             if result.get("_source_before") != source_after:
                 preserve_failed(task_dir, stage_key, read_candidate(result), "read_only_mutation", {"agent": agent, "metadata_path": result.get("metadata_path")})
-                block_transition(task_dir, state, stage_key, "read-only agent mutated source files outside .agent-pipeline", "sandbox_environment")
+                block_transition(task_dir, state, stage_key, "read-only agent mutated source files outside .agent-pipeline", FAILURE_CLASS_SANDBOX_ENVIRONMENT)
                 return EXIT_BLOCKED
         raw_output = read_candidate(result)
         output = normalize_stage_output(stage_key, raw_output)
@@ -541,13 +620,12 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
                 result["dirty_baseline"] = state.get("dirty_baseline")
             assignments[stage_key] = agent
             state.setdefault("stage_agents", {})[stage_key] = agent
+            clear_same_stage_pending_approval(state, stage_key)
             append_log(task_dir, {"event": "artifact_finalization", "stage": stage_key, "pass": pass_number, "attempt": attempt_number, "provider": agent, "artifact_hash": result.get("final_artifact_hash"), "run_id": state.get("run_id")})
-            if result.get("failure_class") in (None, "max_turns", "unknown_failure"):
-                return EXIT_SUCCESS
             return EXIT_SUCCESS
         failure_class = result.get("failure_class") or final["validation"].get("failure_class")
-        preserve_failed(task_dir, stage_key, raw_output, failure_class or "malformed_artifact", {"agent": agent, "metadata_path": result.get("metadata_path")})
-        if failure_class in ("usage_limit", "source_failure") or (failure_class == "rate_limit" and credible_reset(result)):
+        preserve_failed(task_dir, stage_key, raw_output, failure_class or FAILURE_CLASS_MALFORMED_ARTIFACT, {"agent": agent, "metadata_path": result.get("metadata_path")})
+        if failure_class in (FAILURE_CLASS_USAGE_LIMIT, FAILURE_CLASS_SOURCE_FAILURE) or (failure_class == FAILURE_CLASS_RATE_LIMIT and credible_reset(result)):
             mark_unavailable(
                 state, agent, failure_class, result.get("reset_at"),
                 cooldown_write=lambda a, r, rt: record_cross_task_cooldown(config, state, a, r, rt),
@@ -556,11 +634,15 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             next_attempt_kind = "provider_fallback"
             next_retry_reason = "provider fallback"
             continue
-        if failure_class == "max_turns" and useful_partial(output, CONTRACTS[stage_key]) and not state["attempts"].get(stage_key + "_completion_retry"):
+        human_approved_retry_key = stage_key + "_human_approved_retry"
+        if failure_class == FAILURE_CLASS_MAX_TURNS and state["attempts"].get(human_approved_retry_key):
+            block_transition(task_dir, state, stage_key, "real stage failed: " + failure_class, failure_class)
+            return EXIT_BLOCKED
+        if failure_class == FAILURE_CLASS_MAX_TURNS and useful_partial(output, CONTRACTS[stage_key]) and not state["attempts"].get(stage_key + "_completion_retry"):
             state["attempts"][stage_key + "_completion_retry"] = 1
             completion_attempt = increment_attempt(state, stage_key)
             increment_agent_count(state, agent)
-            append_log(task_dir, {"event": "retry_scheduled", "stage": stage_key, "pass": pass_number, "attempt": completion_attempt, "provider": agent, "classification": "max_turns", "retry_reason": "max-turn completion retry", "run_id": state.get("run_id")})
+            append_log(task_dir, {"event": "retry_scheduled", "stage": stage_key, "pass": pass_number, "attempt": completion_attempt, "provider": agent, "classification": FAILURE_CLASS_MAX_TURNS, "retry_reason": "max-turn completion retry", "run_id": state.get("run_id")})
             completion = invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=output, attempt_number=completion_attempt, attempt_kind="completion_only_retry", retry_reason="max-turn completion retry")
             state.setdefault("real_stage_runs", {}).setdefault(stage_key, []).append(completion)
             completion_raw_output = read_candidate(completion)
@@ -574,19 +656,47 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
                     completion["dirty_baseline"] = state.get("dirty_baseline")
                 assignments[stage_key] = agent
                 state.setdefault("stage_agents", {})[stage_key] = agent
+                clear_same_stage_pending_approval(state, stage_key)
                 append_log(task_dir, {"event": "artifact_finalization", "stage": stage_key, "pass": pass_number, "attempt": completion_attempt, "provider": agent, "artifact_hash": completion.get("final_artifact_hash"), "run_id": state.get("run_id")})
                 return EXIT_SUCCESS
-        if failure_class in ("malformed_artifact", "empty_output", "timeout") and attempts < attempt_budget:
+            state["attempts"][human_approved_retry_key] = 1
+            require_retry_approval(
+                state,
+                stage_key,
+                failure_class,
+                agent,
+                "max-turn completion retry did not finalize",
+                retry_type="human_approved_full_stage_retry",
+                failed_attempt_metadata_path=result.get("metadata_path"),
+                failed_attempt_number=result.get("attempt_number"),
+                completion_retry_metadata_path=completion.get("metadata_path"),
+                completion_retry_attempt_number=completion.get("attempt_number"),
+            )
+            return EXIT_BLOCKED
+        if failure_class == FAILURE_CLASS_MAX_TURNS:
+            state["attempts"][human_approved_retry_key] = 1
+            require_retry_approval(
+                state,
+                stage_key,
+                failure_class,
+                agent,
+                "unusable max-turn output",
+                retry_type="human_approved_full_stage_retry",
+                failed_attempt_metadata_path=result.get("metadata_path"),
+                failed_attempt_number=result.get("attempt_number"),
+            )
+            return EXIT_BLOCKED
+        if failure_class in (FAILURE_CLASS_MALFORMED_ARTIFACT, FAILURE_CLASS_EMPTY_OUTPUT, FAILURE_CLASS_TIMEOUT) and attempts < attempt_budget:
             next_attempt_kind = "transient_retry"
-            next_retry_reason = "transient timeout" if failure_class == "timeout" else "malformed output"
+            next_retry_reason = "transient timeout" if failure_class == FAILURE_CLASS_TIMEOUT else "malformed output"
             append_log(task_dir, {"event": "retry_scheduled", "stage": stage_key, "pass": pass_number, "attempt": attempts + 1, "provider": agent, "classification": failure_class, "retry_reason": next_retry_reason, "run_id": state.get("run_id")})
             continue
-        if failure_class == "rate_limit":
+        if failure_class == FAILURE_CLASS_RATE_LIMIT:
             block_transition(task_dir, state, stage_key, "rate limit without credible reset time", failure_class)
             return EXIT_BLOCKED
         block_transition(task_dir, state, stage_key, "real stage failed: " + (failure_class or final["validation"]["reason"]), failure_class or final["validation"].get("failure_class"))
         return EXIT_BLOCKED
-    block_transition(task_dir, state, stage_key, "attempt budget exhausted", "malformed_artifact")
+    block_transition(task_dir, state, stage_key, "attempt budget exhausted", FAILURE_CLASS_MALFORMED_ARTIFACT)
     return EXIT_BLOCKED
 
 
@@ -687,19 +797,22 @@ def record_gate_pass(task_dir, state, pass_number, gate):
         existing.append(record)
 
 
+def archive_stage4_brief_pass(task_dir, pass_number):
+    brief_path = task_dir / CONTRACTS["04"].filename
+    pass_path = task_dir / ("04_final_codex_brief.pass-%d.md" % pass_number)
+    if brief_path.exists():
+        shutil.copyfile(str(brief_path), str(pass_path))
+
+
 def gate_classification(gate):
     if not gate.get("valid"):
-        return "malformed_artifact"
+        return FAILURE_CLASS_MALFORMED_ARTIFACT
     if gate.get("accepted"):
         return "accepted"
-    return "gate_rejected"
+    return FAILURE_CLASS_GATE_REJECTED
 
 
 def clamp_completed_prefix(state, completed_through):
-    if completed_through is None:
-        state["completed_stages"] = []
-        state["current_stage"] = "00"
-        return
     completed = []
     for key in STAGE_ORDER:
         completed.append(key)
@@ -733,14 +846,14 @@ def stage5_report_provenance(task_dir, state):
     report_path = task_dir / CONTRACTS["05"].filename
     validation = validate_file(report_path, "05", read_only=True)
     if not validation["valid"]:
-        return {"valid": False, "reason": "Stage 5 report is structurally invalid: " + validation["reason"], "failure_class": validation.get("failure_class", "malformed_artifact")}
+        return {"valid": False, "reason": "Stage 5 report is structurally invalid: " + validation["reason"], "failure_class": validation.get("failure_class", FAILURE_CLASS_MALFORMED_ARTIFACT)}
     report_hash = sha256_file(report_path)
     runs = state.get("real_stage_runs", {}).get("05") or []
     for run in reversed(runs):
         if not stage5_run_matches_report(run, report_path, report_hash, state):
             continue
         return {"valid": True, "run": run, "report_hash": report_hash}
-    return {"valid": False, "reason": "Stage 5 report exists but no matching successful real Stage 5 provenance record was found", "failure_class": "stage5_ambiguity"}
+    return {"valid": False, "reason": "Stage 5 report exists but no matching successful real Stage 5 provenance record was found", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
 
 
 def stage5_run_matches_report(run, report_path, report_hash, state):
@@ -754,7 +867,7 @@ def stage5_run_matches_report(run, report_path, report_hash, state):
         return False
     if run.get("exit_code") not in (0, None):
         return False
-    if run.get("failure_class") not in (None, "max_turns", "unknown_failure"):
+    if run.get("failure_class") not in (None, FAILURE_CLASS_MAX_TURNS, FAILURE_CLASS_UNKNOWN_FAILURE):
         return False
     candidate = Path(run.get("candidate_artifact_path"))
     if not candidate.exists() or not candidate.is_file():
@@ -788,21 +901,21 @@ def stage5_postprocessing_complete(task_dir, state):
         return report
     manifest_path = task_dir / "05_implementation_manifest.json"
     if not manifest_path.exists():
-        return {"valid": False, "reason": "Stage 5 manifest is missing", "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Stage 5 manifest is missing", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         validate_manifest(manifest)
     except Exception as exc:
-        return {"valid": False, "reason": "Stage 5 manifest is invalid: " + str(exc), "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Stage 5 manifest is invalid: " + str(exc), "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     manifest_run = manifest.get("stage5_run") or {}
     if manifest.get("stage") != "05":
-        return {"valid": False, "reason": "Stage 5 manifest has wrong stage", "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Stage 5 manifest has wrong stage", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     if manifest_run.get("run_id") != report["run"].get("run_id"):
-        return {"valid": False, "reason": "Stage 5 manifest run id does not match current Stage 5 artifact", "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Stage 5 manifest run id does not match current Stage 5 artifact", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     if manifest_run.get("candidate_artifact_path") != report["run"].get("candidate_artifact_path"):
-        return {"valid": False, "reason": "Stage 5 manifest candidate path does not match current Stage 5 artifact", "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Stage 5 manifest candidate path does not match current Stage 5 artifact", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     if manifest_run.get("final_artifact_hash") != report["report_hash"]:
-        return {"valid": False, "reason": "Stage 5 manifest artifact hash does not match current Stage 5 report", "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Stage 5 manifest artifact hash does not match current Stage 5 report", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     overseer = state.get("overseer") or {}
     required_paths = {
         "json_path": task_dir / "05_supervisor_handoff.json",
@@ -812,20 +925,20 @@ def stage5_postprocessing_complete(task_dir, state):
     for key, expected in required_paths.items():
         recorded = overseer.get(key)
         if not recorded:
-            return {"valid": False, "reason": "Stage 5 handoff state is missing " + key, "failure_class": "stage5_ambiguity"}
+            return {"valid": False, "reason": "Stage 5 handoff state is missing " + key, "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
         if Path(recorded) != expected or not expected.exists():
-            return {"valid": False, "reason": "Stage 5 handoff path is missing or inconsistent: " + key, "failure_class": "stage5_ambiguity"}
+            return {"valid": False, "reason": "Stage 5 handoff path is missing or inconsistent: " + key, "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     try:
         parse_overseer_candidate(json.loads(required_paths["json_path"].read_text(encoding="utf-8")))
     except Exception as exc:
-        return {"valid": False, "reason": "Stage 5 supervisor handoff JSON is invalid: " + str(exc), "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Stage 5 supervisor handoff JSON is invalid: " + str(exc), "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     if state.get("state") != "awaiting_human_test":
-        return {"valid": False, "reason": "State is not awaiting human Stage 6 testing", "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "State is not awaiting human Stage 6 testing", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     if state.get("current_stage") != "06":
-        return {"valid": False, "reason": "Current stage is not 06", "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Current stage is not 06", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     checkpoint = state.get("human_checkpoint")
     if not isinstance(checkpoint, dict) or checkpoint.get("stage") != "06":
-        return {"valid": False, "reason": "Human checkpoint for Stage 6 is missing", "failure_class": "stage5_ambiguity"}
+        return {"valid": False, "reason": "Human checkpoint for Stage 6 is missing", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     return {"valid": True, "run": report["run"], "manifest": manifest}
 
 
@@ -902,7 +1015,7 @@ def run_overseer_or_fallback(task_dir, state, config, manifest, assignments, ver
             state["overseer"] = {"agent": agent, "status": "generated", "result": result}
             break
         except Exception as exc:
-            preserve_failed(task_dir, "05", str(exc), "malformed_overseer", {"agent": agent})
+            preserve_failed(task_dir, "05", str(exc), FAILURE_CLASS_MALFORMED_OVERSEER, {"agent": agent})
             state["overseer"] = {"agent": agent, "status": "fallback", "reason": str(exc)}
             continue
     if handoff is None:
@@ -927,6 +1040,7 @@ def run_overseer_or_fallback(task_dir, state, config, manifest, assignments, ver
         config.get("enable_auto_verified", True)
         and verification_report is not None
         and verification_report.get("overall_status") == "passed"
+        and verification_report.get("driven_project_verified") is True
         and (verification_report.get("test_coverage_delta_signal") or {}).get("status") != "flagged"
     )
     if auto_verified_eligible and handoff.get("route") not in ("blocked", "administrator_action"):
@@ -1036,20 +1150,24 @@ def source_snapshot():
 
 def normalize_stage_output(stage_key, output):
     """Remove harmless provider commentary before a required artifact heading."""
-    if stage_key != "04_gate":
+    contract = CONTRACTS.get(stage_key)
+    if not contract:
         return output
 
     stripped = output.lstrip()
-    heading = CONTRACTS[stage_key].heading
+    headings = [contract.heading]
+    if contract.legacy_heading:
+        headings.append(contract.legacy_heading)
 
-    if stripped.startswith(heading):
-        return stripped
+    for heading in headings:
+        if stripped.startswith(heading):
+            return stripped
 
-    marker = "\n" + heading
-    heading_index = stripped.find(marker)
+        marker = "\n" + heading
+        heading_index = stripped.find(marker)
 
-    if heading_index >= 0:
-        return stripped[heading_index + 1:]
+        if heading_index >= 0:
+            return stripped[heading_index + 1:]
 
     return output
 
@@ -1108,7 +1226,7 @@ def ensure_seed_artifacts(task_dir):
 def run_stage(task_dir, state, scenario, mock, stage_key, assignments):
     route = choose_agent(stage_key, state, scenario, assignments)
     if not route:
-        block(state, stage_key, "no valid fallback satisfies role and safety rules", "source_failure")
+        block(state, stage_key, "no valid fallback satisfies role and safety rules", FAILURE_CLASS_SOURCE_FAILURE)
         return EXIT_BLOCKED
     agent = route["agent"]
     if route.get("fallback") or route.get("degraded"):
@@ -1146,22 +1264,22 @@ def run_stage(task_dir, state, scenario, mock, stage_key, assignments):
                 state["pending_approval"] = None
             return EXIT_SUCCESS
         return handle_failure(task_dir, state, scenario, mock, stage_key, agent, attempt, result["validation"]["failure_class"], result["failed_path"], response["output"], assignments)
-    if failure in ("usage_limit",):
+    if failure in (FAILURE_CLASS_USAGE_LIMIT,):
         mark_unavailable(state, agent, failure, response.get("reset_at"))
         append_log(task_dir, {"event": "agent_unavailable", "agent": agent, "failure_class": failure, "run_id": state["run_id"]})
         return EXIT_SUCCESS
-    if failure == "rate_limit" and response.get("reset_at"):
+    if failure == FAILURE_CLASS_RATE_LIMIT and response.get("reset_at"):
         mark_unavailable(state, agent, failure, response.get("reset_at"))
         append_log(task_dir, {"event": "agent_unavailable", "agent": agent, "failure_class": failure, "run_id": state["run_id"]})
         return EXIT_SUCCESS
-    if failure == "max_turns":
+    if failure == FAILURE_CLASS_MAX_TURNS:
         result = atomic_finalize(task_dir, stage_key, response["output"])
         if result["finalized"]:
             assignments[stage_key] = agent
             if state.get("pending_approval") and state["pending_approval"].get("stage") == stage_key:
                 state["pending_approval"] = None
             return EXIT_SUCCESS
-        preserve_failed(task_dir, stage_key, response["output"], "max_turns", {"agent": agent})
+        preserve_failed(task_dir, stage_key, response["output"], FAILURE_CLASS_MAX_TURNS, {"agent": agent})
         if useful_partial(response["output"], CONTRACTS[stage_key]) and not state["attempts"].get(stage_key + "_completion_retry"):
             state["attempts"][stage_key + "_completion_retry"] = 1
             increment_agent_count(state, agent)
@@ -1170,7 +1288,7 @@ def run_stage(task_dir, state, scenario, mock, stage_key, assignments):
             if final["finalized"]:
                 assignments[stage_key] = agent
                 return EXIT_SUCCESS
-            block(state, stage_key, final["validation"]["reason"], "malformed_artifact")
+            block(state, stage_key, final["validation"]["reason"], FAILURE_CLASS_MALFORMED_ARTIFACT)
             return EXIT_BLOCKED
         require_retry_approval(state, stage_key, failure, agent, "unusable max-turn output")
         return EXIT_BLOCKED
@@ -1180,46 +1298,66 @@ def run_stage(task_dir, state, scenario, mock, stage_key, assignments):
 
 def handle_failure(task_dir, state, scenario, mock, stage_key, agent, attempt, failure, failed_path, output, assignments, response=None):
     response = response or {}
-    if failure in ("malformed_artifact", "empty_output"):
+    if failure in (FAILURE_CLASS_MALFORMED_ARTIFACT, FAILURE_CLASS_EMPTY_OUTPUT):
         if attempt < int(scenario.get("attempt_budget", 2)):
             return EXIT_SUCCESS
         block(state, stage_key, "attempt budget exhausted after " + failure, failure)
         return EXIT_BLOCKED
-    if failure == "timeout":
+    if failure == FAILURE_CLASS_TIMEOUT:
         if attempt < int(scenario.get("attempt_budget", 2)):
             return EXIT_SUCCESS
         block(state, stage_key, "timeout retry budget exhausted", failure)
         return EXIT_BLOCKED
-    if failure == "rate_limit":
+    if failure == FAILURE_CLASS_RATE_LIMIT:
         block(state, stage_key, "rate limit without credible reset time", failure)
         return EXIT_BLOCKED
-    if failure == "sandbox_environment" and scenario.get("fallback_same_safety"):
+    if failure == FAILURE_CLASS_SANDBOX_ENVIRONMENT and scenario.get("fallback_same_safety"):
         mark_unavailable(state, agent, failure, None)
         return EXIT_SUCCESS
-    if failure == "process_interrupted":
+    if failure == FAILURE_CLASS_PROCESS_INTERRUPTED:
         state["state"] = "ready"
         state["last_failure"] = failure_record(stage_key, failure, "process interrupted; partial output preserved")
         return EXIT_INTERRUPTED
-    if failure in ("permission_error", "sandbox_environment", "source_failure", "unknown_failure"):
+    if failure in (FAILURE_CLASS_PERMISSION_ERROR, FAILURE_CLASS_SANDBOX_ENVIRONMENT, FAILURE_CLASS_SOURCE_FAILURE, FAILURE_CLASS_UNKNOWN_FAILURE):
         block(state, stage_key, failure + " blocked", failure)
         return EXIT_BLOCKED
     block(state, stage_key, "unhandled failure", failure)
     return EXIT_BLOCKED
 
 
-def require_retry_approval(state, stage_key, failure_class, agent, reason):
+def require_retry_approval(
+    state,
+    stage_key,
+    failure_class,
+    agent,
+    reason,
+    retry_type="temporary_full_retry",
+    failed_attempt_metadata_path=None,
+    failed_attempt_number=None,
+    completion_retry_metadata_path=None,
+    completion_retry_attempt_number=None,
+):
     state["state"] = "awaiting_retry_approval"
-    state["pending_approval"] = {
+    pending = {
         "approval_id": "retry-" + uuid.uuid4().hex[:12],
         "stage": stage_key,
         "failure_class": failure_class,
-        "retry_type": "temporary_full_retry",
+        "retry_type": retry_type,
         "agent": agent,
         "created_at": now(),
         "reason": reason,
         "approved": False,
         "consumed": False,
     }
+    for key, value in (
+        ("failed_attempt_metadata_path", failed_attempt_metadata_path),
+        ("failed_attempt_number", failed_attempt_number),
+        ("completion_retry_metadata_path", completion_retry_metadata_path),
+        ("completion_retry_attempt_number", completion_retry_attempt_number),
+    ):
+        if value is not None:
+            pending[key] = value
+    state["pending_approval"] = pending
     state["last_failure"] = failure_record(stage_key, failure_class, reason)
 
 
@@ -1230,6 +1368,12 @@ def consume_approved_retry_if_present(state, stage_key):
         pending["consumed_at"] = now()
         return True
     return False
+
+
+def clear_same_stage_pending_approval(state, stage_key):
+    pending = state.get("pending_approval")
+    if pending and pending.get("stage") == stage_key:
+        state["pending_approval"] = None
 
 
 def block(state, stage_key, reason, failure_class):
@@ -1265,7 +1409,7 @@ def mark_unavailable(state, agent, reason, reset_at, cooldown_write=None):
 
 def record_cross_task_cooldown(config, state, agent, reason, reset_at):
     cfg = config.get("cross_task_cooldowns", {})
-    if not cfg.get("enabled", True) or reason not in ("usage_limit", "rate_limit"):
+    if not cfg.get("enabled", True) or reason not in (FAILURE_CLASS_USAGE_LIMIT, FAILURE_CLASS_RATE_LIMIT):
         return
     usage.record_cooldown(
         cooldown_store_path(), agent, reason, reset_at,

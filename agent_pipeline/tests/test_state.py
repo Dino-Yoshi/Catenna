@@ -10,6 +10,7 @@ from agent_pipeline.state import (
     CorruptState,
     CONTRACTS,
     STAGE_ORDER,
+    invalidated_from,
     load_state,
     new_state,
     reconcile_artifacts,
@@ -132,6 +133,10 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state["artifact_status"][CONTRACTS["04"].filename]["status"], "valid")
         self.assertEqual(state["artifact_status"][CONTRACTS["04_gate"].filename]["status"], "valid")
         self.assertEqual(state["artifact_status"][CONTRACTS["05"].filename]["status"], "valid")
+
+    def test_stage5_invalidation_includes_stage6_only_for_stage5(self):
+        self.assertEqual(invalidated_from("05"), ["06", "07", "08"])
+        self.assertEqual(invalidated_from("06"), ["07", "08"])
 
 
 if __name__ == "__main__":

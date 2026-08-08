@@ -4,10 +4,17 @@ from __future__ import print_function
 
 import json
 import os
+import re
 from pathlib import Path
+
+try:
+    from collections.abc import Mapping
+except ImportError:  # pragma: no cover - Python 2 compatibility fallback.
+    from collections import Mapping
 
 
 CONFIG_PATH = Path(".agent-pipeline") / "config" / "orchestrator.json"
+DRIVEN_PROJECT_COMMAND_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 DEFAULT_CONFIG = {
@@ -72,6 +79,7 @@ DEFAULT_CONFIG = {
         "overseer": 10,
     },
     "allow_degraded_same_agent_review": False,
+    "verification": {"driven_project_commands": []},
 }
 
 
@@ -116,6 +124,7 @@ def validate_config(config):
     for stage in ("02", "03", "04", "04_gate", "05", "07", "overseer"):
         if stage not in config.get("roles", {}):
             raise ConfigError("missing role config for " + stage)
+    validate_role_agent_references(config)
     for agent in ("codex", "claude", "agy"):
         detail = config.get("agents", {}).get(agent)
         if not detail:
@@ -133,7 +142,66 @@ def validate_config(config):
     reasoning_capture = config.get("reasoning_capture", {})
     if not isinstance(reasoning_capture, dict) or not isinstance(reasoning_capture.get("enabled"), bool):
         raise ConfigError("reasoning_capture.enabled must be a boolean")
+    if not isinstance(config.get("enable_auto_verified"), bool):
+        raise ConfigError("enable_auto_verified must be a boolean")
+    if not isinstance(config.get("allow_degraded_same_agent_review"), bool):
+        raise ConfigError("allow_degraded_same_agent_review must be a boolean")
+    validate_verification_config(config)
+    timeout_seconds = config.get("timeout_seconds")
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+        raise ConfigError("timeout_seconds must be a positive integer")
+    turn_budgets = config.get("turn_budgets", {})
+    if not isinstance(turn_budgets, Mapping):
+        raise ConfigError("turn_budgets must be a mapping")
+    for stage, budget in turn_budgets.items():
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+            raise ConfigError("turn_budgets.%s must be a positive integer" % stage)
     return True
+
+
+def validate_verification_config(config):
+    verification = config.get("verification", {})
+    if not isinstance(verification, Mapping):
+        raise ConfigError("verification must be a mapping")
+    commands = verification.get("driven_project_commands", [])
+    if not isinstance(commands, list):
+        raise ConfigError("verification.driven_project_commands must be a list")
+    names = set()
+    for index, command in enumerate(commands):
+        prefix = "verification.driven_project_commands[%d]" % index
+        if not isinstance(command, Mapping):
+            raise ConfigError(prefix + " must be a mapping")
+        name = command.get("name")
+        if not isinstance(name, str) or not name or not DRIVEN_PROJECT_COMMAND_NAME_RE.match(name):
+            raise ConfigError(prefix + ".name must be a non-empty string matching ^[A-Za-z0-9_.-]+$")
+        if name in names:
+            raise ConfigError("verification.driven_project_commands name is duplicated: " + name)
+        names.add(name)
+        argv = command.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+            raise ConfigError(prefix + ".argv must be a non-empty list of strings")
+        if "timeout_seconds" in command:
+            timeout = command.get("timeout_seconds")
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+                raise ConfigError(prefix + ".timeout_seconds must be a positive integer")
+
+
+def validate_role_agent_references(config):
+    agents = config.get("agents", {})
+    if not isinstance(agents, dict):
+        raise ConfigError("agents must be a mapping")
+    for role_name, role in config.get("roles", {}).items():
+        if not isinstance(role, dict):
+            raise ConfigError("role %s must be a mapping" % role_name)
+        primary = role.get("primary")
+        if primary not in agents:
+            raise ConfigError("role %s primary references unknown agent %r" % (role_name, primary))
+        fallbacks = role.get("fallbacks", [])
+        if not isinstance(fallbacks, list):
+            raise ConfigError("role %s fallbacks must be a list" % role_name)
+        for fallback in fallbacks:
+            if fallback not in agents:
+                raise ConfigError("role %s fallback references unknown agent %r" % (role_name, fallback))
 
 
 def configured_candidates(config, role_key):

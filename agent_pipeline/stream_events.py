@@ -17,8 +17,16 @@ from __future__ import print_function
 
 import json
 
+from .failures import (
+    FAILURE_CLASS_MAX_TURNS,
+    FAILURE_CLASS_PROCESS_INTERRUPTED,
+    FAILURE_CLASS_TIMEOUT,
+    FAILURE_CLASS_UNKNOWN_FAILURE,
+)
 
-def _iter_json_lines(stdout_text):
+
+def parse_json_lines(stdout_text):
+    events = []
     for line in (stdout_text or "").splitlines():
         line = line.strip()
         if not line:
@@ -28,7 +36,14 @@ def _iter_json_lines(stdout_text):
         except ValueError:
             continue
         if isinstance(obj, dict):
-            yield obj
+            events.append(obj)
+    return events
+
+
+def _events(stdout_text, events=None):
+    if events is not None:
+        return events
+    return parse_json_lines(stdout_text)
 
 
 def detect_agent(obj):
@@ -44,27 +59,28 @@ def detect_agent(obj):
     return None
 
 
-def detect_agent_from_stream(stdout_text):
-    for obj in _iter_json_lines(stdout_text):
+def detect_agent_from_stream(stdout_text, events=None):
+    for obj in _events(stdout_text, events):
         agent = detect_agent(obj)
         if agent:
             return agent
     return None
 
 
-def final_text(agent, stdout_text):
+def final_text(agent, stdout_text, events=None):
     """Extract the final response text from a completed JSONL stream.
 
     Returns None if the agent is unrecognized or no final-text event is
     found (including: stdout isn't JSONL at all, e.g. a plain-text
     fixture) so callers can fall back to their own default behavior.
     """
+    events = _events(stdout_text, events)
     if agent is None:
-        agent = detect_agent_from_stream(stdout_text)
+        agent = detect_agent_from_stream(stdout_text, events=events)
     if agent is None:
         return None
     text = None
-    for obj in _iter_json_lines(stdout_text):
+    for obj in events:
         if agent == "codex":
             if obj.get("type") == "item.completed":
                 item = obj.get("item") or {}
@@ -100,7 +116,7 @@ def _normalize_usage(raw_usage, total_cost_usd=None):
     return normalized
 
 
-def usage_summary(agent, stdout_text):
+def usage_summary(agent, stdout_text, events=None):
     """Best-effort token/cost usage extracted from a completed JSONL stream.
 
     Returns None if the agent is unrecognized or no usage-bearing event is
@@ -108,12 +124,13 @@ def usage_summary(agent, stdout_text):
     never guesses. The last usage-bearing event in the stream wins, same as
     final_text's "last one wins" handling of streamed text.
     """
+    events = _events(stdout_text, events)
     if agent is None:
-        agent = detect_agent_from_stream(stdout_text)
+        agent = detect_agent_from_stream(stdout_text, events=events)
     if agent is None:
         return None
     usage = None
-    for obj in _iter_json_lines(stdout_text):
+    for obj in events:
         if agent == "codex":
             if obj.get("type") == "turn.completed" and isinstance(obj.get("usage"), dict):
                 usage = _normalize_usage(obj["usage"])
@@ -127,7 +144,7 @@ def usage_summary(agent, stdout_text):
     return usage
 
 
-def reasoning_summary(agent, stdout_text):
+def reasoning_summary(agent, stdout_text, events=None):
     """Best-effort chain-of-thought/reasoning text extracted from a
     completed JSONL stream -- the "peer into thinking" signal, kept
     separate from final_text since a reader wants to distinguish the
@@ -143,20 +160,21 @@ def reasoning_summary(agent, stdout_text):
     today (its step_update events carry no reasoning text) -- always
     returns None for agy, same as an unrecognized agent.
     """
+    events = _events(stdout_text, events)
     if agent is None:
-        agent = detect_agent_from_stream(stdout_text)
+        agent = detect_agent_from_stream(stdout_text, events=events)
     if agent is None:
         return None
     if agent == "codex":
-        return _reasoning_codex(stdout_text)
+        return _reasoning_codex(stdout_text, events=events)
     if agent == "claude":
-        return _reasoning_claude(stdout_text)
+        return _reasoning_claude(stdout_text, events=events)
     return None
 
 
-def _reasoning_codex(stdout_text):
+def _reasoning_codex(stdout_text, events=None):
     segments = []
-    for obj in _iter_json_lines(stdout_text):
+    for obj in _events(stdout_text, events):
         if obj.get("type") != "item.completed":
             continue
         item = obj.get("item") or {}
@@ -165,10 +183,10 @@ def _reasoning_codex(stdout_text):
     return "\n\n".join(segments) if segments else None
 
 
-def _reasoning_claude(stdout_text):
+def _reasoning_claude(stdout_text, events=None):
     blocks = {}
     order = []
-    for obj in _iter_json_lines(stdout_text):
+    for obj in _events(stdout_text, events):
         if obj.get("type") != "stream_event":
             continue
         event = obj.get("event") or {}
@@ -191,48 +209,49 @@ def _reasoning_claude(stdout_text):
 
 
 _CLAUDE_ERROR_SUBTYPE_MAP = {
-    "error_max_turns": "max_turns",
-    "error_during_execution": "unknown_failure",
+    "error_max_turns": FAILURE_CLASS_MAX_TURNS,
+    "error_during_execution": FAILURE_CLASS_UNKNOWN_FAILURE,
 }
 
 _AGY_STATUS_MAP = {
-    "MAX_TURNS": "max_turns",
-    "TIMEOUT": "timeout",
-    "ERROR": "unknown_failure",
-    "CANCELLED": "process_interrupted",
+    "MAX_TURNS": FAILURE_CLASS_MAX_TURNS,
+    "TIMEOUT": FAILURE_CLASS_TIMEOUT,
+    "ERROR": FAILURE_CLASS_UNKNOWN_FAILURE,
+    "CANCELLED": FAILURE_CLASS_PROCESS_INTERRUPTED,
 }
 
 
-def structured_failure(agent, stdout_text):
+def structured_failure(agent, stdout_text, events=None):
     """Best-effort structured failure classification from a JSONL stream.
 
     Returns None (never a made-up guess) when nothing recognizable is
     found, so callers fall back to their existing substring-based
     classification untouched.
     """
+    events = _events(stdout_text, events)
     if agent is None:
-        agent = detect_agent_from_stream(stdout_text)
+        agent = detect_agent_from_stream(stdout_text, events=events)
     if agent is None:
         return None
     classification = None
-    for obj in _iter_json_lines(stdout_text):
+    for obj in events:
         if agent == "claude":
             if obj.get("type") == "result":
                 subtype = obj.get("subtype")
                 if obj.get("is_error") and subtype:
-                    classification = _CLAUDE_ERROR_SUBTYPE_MAP.get(subtype, "unknown_failure")
+                    classification = _CLAUDE_ERROR_SUBTYPE_MAP.get(subtype, FAILURE_CLASS_UNKNOWN_FAILURE)
         elif agent == "agy":
             if obj.get("event") == "result":
                 status = (obj.get("result") or {}).get("status")
                 if status and status != "SUCCESS":
-                    classification = _AGY_STATUS_MAP.get(status, "unknown_failure")
+                    classification = _AGY_STATUS_MAP.get(status, FAILURE_CLASS_UNKNOWN_FAILURE)
         elif agent == "codex":
             if obj.get("type") == "turn.failed":
                 reason = str((obj.get("error") or {}).get("message") or "").lower()
                 if "max" in reason and "turn" in reason:
-                    classification = "max_turns"
+                    classification = FAILURE_CLASS_MAX_TURNS
                 else:
-                    classification = "unknown_failure"
+                    classification = FAILURE_CLASS_UNKNOWN_FAILURE
     return classification
 
 

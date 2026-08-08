@@ -110,6 +110,14 @@ class DetectAgentTests(unittest.TestCase):
     def test_plain_text_has_no_agent(self):
         self.assertIsNone(stream_events.detect_agent_from_stream(PLAIN_TEXT_STREAM))
 
+    def test_helpers_reuse_supplied_events_when_agent_is_omitted(self):
+        mixed = "not json\n" + CLAUDE_STREAM_WITH_USAGE + "\n{bad json"
+        events = stream_events.parse_json_lines(mixed)
+        self.assertEqual(stream_events.detect_agent_from_stream("ignored", events=events), "claude")
+        self.assertEqual(stream_events.final_text(None, "ignored", events=events), "final claude text")
+        self.assertEqual(stream_events.usage_summary(None, "ignored", events=events)["input_tokens"], 120)
+        self.assertIsNone(stream_events.structured_failure(None, "ignored", events=events))
+
 
 class FinalTextTests(unittest.TestCase):
     def test_codex_final_text(self):

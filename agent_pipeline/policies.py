@@ -2,6 +2,12 @@
 
 from __future__ import print_function
 
+# ROLE_POLICY is for the mock/deterministic test harness. It is intentionally
+# not a mirror of config.py DEFAULT_CONFIG["roles"], and exercises generic
+# fallback-selection logic more broadly than one real deployment config. Real
+# Stage 05 intentionally has no fallbacks because it crosses the workspace-write
+# trust boundary; passing mock Stage 05 fallback behavior is not evidence that
+# real Stage 05 fallback is safe or possible.
 ROLE_POLICY = {
     "02": {"role": "stage_2_spec_author", "primary": "codex", "fallbacks": ["agy", "claude"], "independent_from": None},
     "03": {"role": "stage_3_spec_audit", "primary": "codex", "fallbacks": ["agy", "claude"], "independent_from": None},

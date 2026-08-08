@@ -3,6 +3,27 @@
 from __future__ import print_function
 
 from .artifacts import CONTRACTS
+from .failures import (
+    FAILURE_CLASS_EMPTY_OUTPUT,
+    FAILURE_CLASS_MALFORMED_ARTIFACT,
+    FAILURE_CLASS_MAX_TURNS,
+    FAILURE_CLASS_PERMISSION_ERROR,
+    FAILURE_CLASS_PROCESS_INTERRUPTED,
+    FAILURE_CLASS_RATE_LIMIT,
+    FAILURE_CLASS_SANDBOX_ENVIRONMENT,
+    FAILURE_CLASS_SOURCE_FAILURE,
+    FAILURE_CLASS_TIMEOUT,
+    FAILURE_CLASS_UNKNOWN_FAILURE,
+    FAILURE_CLASS_USAGE_LIMIT,
+)
+
+
+_OUTCOME_FAILURE_CLASSES = {
+    "permission_error": FAILURE_CLASS_PERMISSION_ERROR,
+    "sandbox_environment": FAILURE_CLASS_SANDBOX_ENVIRONMENT,
+    "source_failure": FAILURE_CLASS_SOURCE_FAILURE,
+    "unknown_failure": FAILURE_CLASS_UNKNOWN_FAILURE,
+}
 
 
 def valid_artifact(stage_key):
@@ -66,18 +87,18 @@ class MockAgent(object):
         outcome = self.outcome_for(stage_key, attempt)
         if completion_only:
             if self.scenario.get("completion_retry_outcome") == "malformed_artifact":
-                return {"agent": agent, "failure_class": "malformed_artifact", "output": malformed(stage_key)}
+                return {"agent": agent, "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT, "output": malformed(stage_key)}
             outcome = "success"
         if outcome in ("success", "max_turns_complete"):
             return {"agent": agent, "failure_class": None, "output": valid_artifact(stage_key)}
         if outcome == "max_turns_useful_partial":
-            return {"agent": agent, "failure_class": "max_turns", "output": useful_partial(stage_key)}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_MAX_TURNS, "output": useful_partial(stage_key)}
         if outcome == "max_turns_unusable":
-            return {"agent": agent, "failure_class": "max_turns", "output": malformed(stage_key)}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_MAX_TURNS, "output": malformed(stage_key)}
         if outcome == "malformed_artifact":
-            return {"agent": agent, "failure_class": "malformed_artifact", "output": malformed(stage_key)}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT, "output": malformed(stage_key)}
         if outcome == "empty_output":
-            return {"agent": agent, "failure_class": "empty_output", "output": empty(stage_key)}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_EMPTY_OUTPUT, "output": empty(stage_key)}
         if outcome == "malformed_gate":
             return {"agent": agent, "failure_class": None, "output": gate_artifact(stage_key, "ready_for_implementation true")}
         if outcome == "missing_gate_key":
@@ -85,18 +106,18 @@ class MockAgent(object):
         if outcome == "wrong_gate_type":
             return {"agent": agent, "failure_class": None, "output": gate_artifact(stage_key, "ready_for_implementation: yes\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []")}
         if outcome == "usage_limit":
-            return {"agent": agent, "failure_class": "usage_limit", "output": "", "reset_at": "2099-01-01T00:00:00Z"}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_USAGE_LIMIT, "output": "", "reset_at": "2099-01-01T00:00:00Z"}
         if outcome == "rate_limit_with_reset":
-            return {"agent": agent, "failure_class": "rate_limit", "output": "", "reset_at": "2099-01-01T00:00:00Z"}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_RATE_LIMIT, "output": "", "reset_at": "2099-01-01T00:00:00Z"}
         if outcome == "rate_limit_no_reset":
-            return {"agent": agent, "failure_class": "rate_limit", "output": useful_partial(stage_key)}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_RATE_LIMIT, "output": useful_partial(stage_key)}
         if outcome == "timeout":
-            return {"agent": agent, "failure_class": "timeout", "output": useful_partial(stage_key)}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_TIMEOUT, "output": useful_partial(stage_key)}
         if outcome == "process_interrupted":
-            return {"agent": agent, "failure_class": "process_interrupted", "output": useful_partial(stage_key)}
-        if outcome in ("permission_error", "sandbox_environment", "source_failure", "unknown_failure"):
-            return {"agent": agent, "failure_class": outcome, "output": useful_partial(stage_key)}
-        return {"agent": agent, "failure_class": "unknown_failure", "output": "unknown scenario outcome\n"}
+            return {"agent": agent, "failure_class": FAILURE_CLASS_PROCESS_INTERRUPTED, "output": useful_partial(stage_key)}
+        if outcome in _OUTCOME_FAILURE_CLASSES:
+            return {"agent": agent, "failure_class": _OUTCOME_FAILURE_CLASSES[outcome], "output": useful_partial(stage_key)}
+        return {"agent": agent, "failure_class": FAILURE_CLASS_UNKNOWN_FAILURE, "output": "unknown scenario outcome\n"}
 
 
 def gate_artifact(stage_key, gate_body):
