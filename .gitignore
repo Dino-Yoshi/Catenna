@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 .agent-pipeline/
+.venv/
+agent_pipeline.egg-info/
