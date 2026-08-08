@@ -98,6 +98,86 @@ def task_dir_for(task):
     return candidate
 
 
+def current_task_path():
+    return REPO_ROOT / ".agent-pipeline" / "current-task"
+
+
+def read_current_task():
+    """Return the persisted current-task name, or None if unset/unreadable.
+    Best-effort, never raises (mirrors usage.load_cooldowns)."""
+    try:
+        text = current_task_path().read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return text or None
+
+
+def write_current_task(task):
+    task = validate_task_id(task)
+    path = current_task_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / (path.name + ".tmp.%d" % os.getpid())
+    with open(str(tmp), "w", encoding="utf-8") as handle:
+        handle.write(task + "\n")
+    os.replace(str(tmp), str(path))
+
+
+def resolve_task(explicit_task):
+    """Return (task, used_default). Falls back to the persisted current-task
+    pointer when explicit_task is not given; raises ControllerError if
+    neither is available."""
+    if explicit_task:
+        return explicit_task, False
+    task = read_current_task()
+    if task:
+        return task, True
+    raise ControllerError(
+        "no task given and no current task set — pass a task name, or run 'catenna use <task>' first (see 'catenna tasks')",
+        EXIT_BAD_INPUT,
+    )
+
+
+def use_task(task):
+    """CLI-facing: set or show the current-task pointer. Setting is
+    permissive: tasks are created lazily elsewhere, so the task directory
+    need not exist yet -- warn rather than block."""
+    if not task:
+        current = read_current_task()
+        if current:
+            print("current task: %s" % current)
+        else:
+            print("no current task set")
+        return EXIT_SUCCESS
+    task_dir = task_dir_for(task)
+    if not task_dir.exists():
+        print("warning: task directory does not exist yet for %r (will be created when the task runs)" % task)
+    write_current_task(task)
+    print("current task set to: %s" % task)
+    return EXIT_SUCCESS
+
+
+def list_tasks():
+    """CLI-facing: list every task directory under TASKS_ROOT with its
+    state, marking whichever matches the current-task pointer."""
+    if not TASKS_ROOT.exists():
+        print("no tasks found under %s" % TASKS_ROOT)
+        return EXIT_SUCCESS
+    task_names = sorted(p.name for p in TASKS_ROOT.iterdir() if p.is_dir())
+    if not task_names:
+        print("no tasks found under %s" % TASKS_ROOT)
+        return EXIT_SUCCESS
+    current = read_current_task()
+    for name in task_names:
+        marker = "*" if name == current else " "
+        try:
+            state = load_state(TASKS_ROOT / name, name)
+            state_label = state["state"]
+        except CorruptState:
+            state_label = "CORRUPT"
+        print("%s %s  %s" % (marker, name, state_label))
+    return EXIT_SUCCESS
+
+
 def load_scenarios():
     with open(str(SCENARIO_PATH), "r", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -347,7 +427,7 @@ def pipeline_run(task, allow_dirty=False):
         print("invalid real-run config: %s" % exc)
         return EXIT_VALIDATION
     try:
-        with TaskLock(task_dir, "pipeline-run", run_id):
+        with TaskLock(task_dir, "run", run_id):
             state = load_state(task_dir, task)
             noop = checkpoint_noop_eligible(task_dir, state)
             if noop["eligible"]:
