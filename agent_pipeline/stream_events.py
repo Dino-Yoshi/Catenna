@@ -255,7 +255,7 @@ def structured_failure(agent, stdout_text, events=None):
     return classification
 
 
-def summarize_event(agent, obj):
+def summarize_event(agent, obj, verbose=False):
     """One short human-readable line for a single parsed event, or None
     if the event isn't worth printing (e.g. a raw text delta)."""
     if not isinstance(obj, dict):
@@ -263,15 +263,15 @@ def summarize_event(agent, obj):
     if agent is None:
         agent = detect_agent(obj)
     if agent == "codex":
-        return _summarize_codex(obj)
+        return _summarize_codex(obj, verbose=verbose)
     if agent == "claude":
-        return _summarize_claude(obj)
+        return _summarize_claude(obj, verbose=verbose)
     if agent == "agy":
-        return _summarize_agy(obj)
-    return "[unknown] " + _short(obj)
+        return _summarize_agy(obj, verbose=verbose)
+    return "[unknown] " + _short(obj, verbose=verbose)
 
 
-def _summarize_codex(obj):
+def _summarize_codex(obj, verbose=False):
     kind = obj.get("type")
     if kind == "thread.started":
         return "thread started"
@@ -286,21 +286,21 @@ def _summarize_codex(obj):
         item = obj.get("item") or {}
         item_type = item.get("type")
         if item_type == "agent_message":
-            return "message: " + _truncate(item.get("text"))
+            return "message: " + _truncate(item.get("text"), verbose=verbose)
         if item_type in ("command_execution", "function_call"):
-            return "tool call: " + _truncate(item.get("command") or item.get("name") or item_type)
+            return "tool call: " + _truncate(item.get("command") or item.get("name") or item_type, verbose=verbose)
         return "item completed: " + str(item_type)
     return None
 
 
-def _summarize_claude(obj):
+def _summarize_claude(obj, verbose=False):
     kind = obj.get("type")
     if kind == "system" and obj.get("subtype") == "init":
         return "session started"
     if kind == "result":
         if obj.get("is_error"):
             return "result: error (%s)" % obj.get("subtype")
-        return "result: " + _truncate(obj.get("result"))
+        return "result: " + _truncate(obj.get("result"), verbose=verbose)
     if kind == "stream_event":
         event = obj.get("event") or {}
         etype = event.get("type")
@@ -316,7 +316,7 @@ def _summarize_claude(obj):
     return None
 
 
-def _summarize_agy(obj):
+def _summarize_agy(obj, verbose=False):
     kind = obj.get("event")
     if kind == "init":
         return "session started"
@@ -333,19 +333,22 @@ def _summarize_agy(obj):
         result = obj.get("result") or {}
         if result.get("status") and result["status"] != "SUCCESS":
             return "result: %s" % result["status"]
-        return "result: " + _truncate(result.get("response"))
+        return "result: " + _truncate(result.get("response"), verbose=verbose)
     return None
 
 
-def _truncate(text, limit=120):
+def _truncate(text, limit=120, verbose=False):
     text = str(text or "").replace("\n", " ").strip()
+    if verbose:
+        return text
     if len(text) > limit:
         return text[:limit] + "..."
     return text
 
 
-def _short(obj):
+def _short(obj, verbose=False):
     try:
-        return json.dumps(obj)[:120]
+        text = json.dumps(obj)
     except Exception:
-        return str(obj)[:120]
+        text = str(obj)
+    return text if verbose else text[:120]
