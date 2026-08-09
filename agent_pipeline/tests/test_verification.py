@@ -304,9 +304,19 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["exit_code"], 1)
 
+    def test_gradle_writes_completion_sidecar_matching_result(self):
+        self.write_fake_gradlew("import sys\nsys.exit(0)\n")
+
+        result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+
+        sidecar = Path(result["stdout_path"]).with_suffix(".json")
+        self.assertTrue(sidecar.exists())
+        self.assertEqual(json.loads(sidecar.read_text(encoding="utf-8")), result)
+
     def test_missing_gradlew_is_not_attempted(self):
         result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
         self.assertEqual(result["status"], "not_attempted")
+        self.assertEqual(list(self.runs_dir.glob("*.json")), [])
 
 
 class DrivenProjectChecksTests(unittest.TestCase):
@@ -353,6 +363,7 @@ class DrivenProjectChecksTests(unittest.TestCase):
         self.assertFalse(check["timed_out"])
         self.assertEqual(check["command"], argv)
         self.assertEqual(Path(check["stdout_path"]).read_text(encoding="utf-8"), "ok")
+        self.assertEqual(json.loads(Path(check["stdout_path"]).with_suffix(".json").read_text(encoding="utf-8")), check)
 
     def test_nonzero_exit_fails(self):
         script = self.write_script("fail.py", "import sys\nsys.exit(7)\n")
@@ -391,6 +402,7 @@ class DrivenProjectChecksTests(unittest.TestCase):
         self.assertFalse(check["timed_out"])
         self.assertEqual(Path(check["stdout_path"]).read_text(encoding="utf-8"), "")
         self.assertTrue(Path(check["stderr_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(Path(check["stdout_path"]).with_suffix(".json").read_text(encoding="utf-8")), check)
 
 
 class RunUnitTestsAndMockPipelineIntegrationTests(unittest.TestCase):
@@ -416,6 +428,47 @@ class RunUnitTestsAndMockPipelineIntegrationTests(unittest.TestCase):
         result = verification.run_mock_pipeline(PACKAGE_ROOT, self.runs_dir, timeout_seconds=60)
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["exit_code"], 0)
+        sidecar = Path(result["stdout_path"]).with_suffix(".json")
+        self.assertTrue(sidecar.exists())
+        self.assertEqual(json.loads(sidecar.read_text(encoding="utf-8")), result)
+
+
+class RunUnitTestsSidecarTests(unittest.TestCase):
+    """run_unit_tests's real UNIT_TEST_ARGS is `-m unittest discover -s
+    agent_pipeline/tests` -- invoking that for real from inside this very
+    suite would recursively re-run this suite (and every nested invocation
+    would do the same), so unlike run_mock_pipeline's real-invocation
+    coverage above, this uses a fake python executable/args, matching
+    RunGradleFakeFixtureTests' sidecar-testing pattern."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.runs_dir = Path(self.tmp.name)
+        self._orig_python_executable = verification.python_executable
+        self._orig_unit_test_args = verification.UNIT_TEST_ARGS
+
+    def tearDown(self):
+        verification.python_executable = self._orig_python_executable
+        verification.UNIT_TEST_ARGS = self._orig_unit_test_args
+        self.tmp.cleanup()
+
+    def test_writes_completion_sidecar_matching_result(self):
+        fake_python = Path(self.tmp.name) / "fake_python.py"
+        fake_python.write_text(
+            "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('Ran 3 tests in 0.1s\\n\\nOK\\n')\nsys.exit(0)\n",
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
+        verification.python_executable = lambda: str(fake_python)
+        verification.UNIT_TEST_ARGS = []
+
+        result = verification.run_unit_tests(PACKAGE_ROOT, self.runs_dir, timeout_seconds=10)
+
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["exit_code"], 0)
+        sidecar = Path(result["stdout_path"]).with_suffix(".json")
+        self.assertTrue(sidecar.exists())
+        self.assertEqual(json.loads(sidecar.read_text(encoding="utf-8")), result)
 
 
 class RunVerificationOrchestrationTests(unittest.TestCase):

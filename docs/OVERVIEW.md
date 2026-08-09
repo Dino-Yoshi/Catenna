@@ -215,10 +215,12 @@ Key modules:
   events, claude's `thinking_delta` content-block deltas accumulated per
   block index; agy has no known reasoning-bearing event today, always
   `None`, same "no confirmed fixture" caveat as agy's usage extraction).
-- `tail.py` — read-only `locate`/`follow`/`brief` over `runs/*.stdout` +
-  `*.json` sidecars; no locking, no state mutation. `brief()` also prints
-  `reasoning:`/`reasoning_path:` lines (Phase 5) when the metadata sidecar
-  has `reasoning_path` set, mirroring the `usage:` line from Phase 4.
+- `tail.py` — read-only `locate`/`follow` over `runs/*.stdout` and, for
+  unfiltered tails, `verification_runs/*.stdout` with `*.json` completion
+  sidecars; no locking, no state mutation. `brief()` remains pipeline-run
+  only and also prints `reasoning:`/`reasoning_path:` lines (Phase 5) when
+  the metadata sidecar has `reasoning_path` set, mirroring the `usage:`
+  line from Phase 4.
 - `failures.py` — exit codes, valid state enum
   (`VALID_STATES` in failures.py), banned-word guard for mock fixtures.
 - `runner.py` — atomic candidate-to-final artifact promotion.
@@ -407,8 +409,8 @@ target, and it never consults the current-task pointer.
 | `run`                | positional, optional       | `--allow-dirty`                     | Runs/resumes the real Stage 00-08 pipeline.     |
 | `approve-retry`      | positional, optional       | `--approval-id` (required)          | Approves one pending expensive retry.           |
 | `unlock`             | positional, optional       | `--reason` (required)               | Explicitly removes an orchestrator lock.        |
-| `tail`               | positional, optional       | `--stage`, `--run-id`               | Live-tails the current/most recent agent run.   |
-| `brief`              | positional, optional       | `--stage`, `--run-id`               | Prints a compact summary of a run.              |
+| `tail`               | positional, optional       | `--stage`, `--run-id`, `--verbose`  | Live-tails the current/most recent pipeline or verification output. |
+| `brief`              | positional, optional       | `--stage`, `--run-id`, `--verbose`  | Prints a compact summary of a pipeline run.     |
 | `verify`             | positional, optional       | `--build` (also runs `./gradlew build`, not just `compileJava`) | Runs build/test + driven-project checks, writes a verification report. |
 | `usage`              | `--task` (filter, default: all tasks) | `--agent`, `--since-hours` | Prints a usage/cost summary from the cross-task ledger, plus active cross-task cooldowns. |
 | `report`             | positional, optional       | —                                    | Prints a legible per-task report: stages, decision, verification, usage, reasoning traces. |

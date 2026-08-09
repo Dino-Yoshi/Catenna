@@ -573,6 +573,7 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertNotIn("--background", calls[0][1])
             self.assertIn("catenna tail bg-run", output)
             self.assertIn("catenna status bg-run", output)
+            self.assertIn("catenna report bg-run", output)
 
     def test_pipeline_verify_background_preserves_build_and_prints_report_not_tail(self):
         with tempfile.TemporaryDirectory() as tmp:

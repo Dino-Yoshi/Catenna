@@ -24,13 +24,11 @@ Both commands drive every stage synchronously and in-process —
 `run_to_files()` calls `subprocess.Popen(...).communicate(timeout=...)`
 per stage — with no way to back off. `catenna verify --build` can block
 for up to 30 minutes (the `gradle build` timeout). Neither subparser has
-a daemonize/background option. `run` at least has a working `catenna
-tail`/`catenna status` from a second terminal; `verify` writes its output
-to a different directory (`.orchestrator/verification_runs/`) that
-neither `tail` nor `status` reads, so it has no live-tail equivalent at
-all today. Core complaint: a single-terminal workflow has no way to kick
-either off and then do anything else, including check on it, until it
-finishes.
+a daemonize/background option. `run` has a working `catenna tail`/
+`catenna status` from a second terminal, and unfiltered `catenna tail`
+can now follow verification stdout from `.orchestrator/verification_runs/`.
+Core complaint: a single-terminal workflow has no way to kick either off
+and then do anything else, including check on it, until it finishes.
 
 Fixed 2026-08-08: `run` and `verify` now accept `--background` and write
 detached output to per-task `.orchestrator/background_*.log` files.
@@ -47,3 +45,18 @@ equally affected.
 
 Fixed 2026-08-08: help/usage shows `catenna` for the console script and
 keeps `python3 -m agent_pipeline.cli` for module-form invocation.
+
+## 2026-08-09: `catenna tail` now follows a task's whole lifecycle, into `verify` too
+
+Follow-up to the 2026-08-08 "block the terminal" entry above, whose
+"verify has no live-tail equivalent at all today" gap is now closed.
+`tail.follow()` used to stop after a single pipeline stage and never
+looked at `.orchestrator/verification_runs/` at all. Unfiltered `catenna
+tail <task>` now auto-advances across pipeline stages and into
+verification checks, rendering `verification_runs/` output as raw lines
+(it's plain gradle/pytest/unittest stdout, not agent-stream JSONL) and
+stopping once the task reaches a terminal/paused state or
+`05_verification_report.md` is written. Getting there required adding
+completion `.json` sidecars to `verification.py`'s four check functions,
+since `run_to_files()` never wrote one on its own (a gap not present in
+the original idea, found while speccing this).

@@ -53,6 +53,10 @@ def verification_runs_dir(task_dir):
     return directory
 
 
+def _write_check_sidecar(stdout_path, result):
+    Path(stdout_path).with_suffix(".json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def check_concurrency_guard(task_dir, allow_pid=None):
     """Refuse to run while this task's own orchestrator lock is held by a
     live process -- a workspace-write stage (Stage 5) may be mid-edit, and
@@ -90,7 +94,7 @@ def run_unit_tests(repo_root, runs_dir, timeout_seconds=600):
     duration = time.time() - started
     summary = parse_unittest_summary(safe_read(stderr_path))
     status = "passed" if exit_code == 0 and not timed_out else "failed"
-    return {
+    result = {
         "name": "unit_tests",
         "status": status,
         "exit_code": exit_code,
@@ -101,6 +105,8 @@ def run_unit_tests(repo_root, runs_dir, timeout_seconds=600):
         "stderr_path": str(stderr_path),
         "summary": summary,
     }
+    _write_check_sidecar(stdout_path, result)
+    return result
 
 
 def run_mock_pipeline(repo_root, runs_dir, timeout_seconds=120):
@@ -112,7 +118,7 @@ def run_mock_pipeline(repo_root, runs_dir, timeout_seconds=120):
     exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=PACKAGE_ROOT)
     duration = time.time() - started
     status = "passed" if exit_code == 0 and not timed_out else "failed"
-    return {
+    result = {
         "name": "mock_pipeline",
         "status": status,
         "exit_code": exit_code,
@@ -122,6 +128,8 @@ def run_mock_pipeline(repo_root, runs_dir, timeout_seconds=120):
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
+    _write_check_sidecar(stdout_path, result)
+    return result
 
 
 def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overrides=None):
@@ -145,7 +153,7 @@ def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overr
     exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=repo_root, env=env)
     duration = time.time() - started
     status = "passed" if exit_code == 0 and not timed_out else "failed"
-    return {
+    result = {
         "name": "gradle_" + gradle_task,
         "status": status,
         "exit_code": exit_code,
@@ -155,6 +163,8 @@ def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overr
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
+    _write_check_sidecar(stdout_path, result)
+    return result
 
 
 def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None):
@@ -176,7 +186,7 @@ def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None)
             timed_out = False
         duration = time.time() - started
         status = "passed" if exit_code == 0 and not timed_out else "failed"
-        checks.append({
+        result = {
             "name": "driven_project_" + name,
             "status": status,
             "exit_code": exit_code,
@@ -185,7 +195,9 @@ def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None)
             "command": argv,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
-        })
+        }
+        _write_check_sidecar(stdout_path, result)
+        checks.append(result)
     return checks
 
 

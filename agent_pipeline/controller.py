@@ -280,15 +280,15 @@ def dry_run(task):
     return EXIT_SUCCESS
 
 
-def pipeline_tail(task, stage=None, run_id=None):
+def pipeline_tail(task, stage=None, run_id=None, verbose=False):
     task_dir = task_dir_for(task)
-    result = tail_module.follow(task_dir, stage=stage, run_id=run_id)
+    result = tail_module.follow(task_dir, stage=stage, run_id=run_id, verbose=verbose)
     return EXIT_SUCCESS if result in ("complete", "interrupted", "timed_out") else EXIT_BLOCKED
 
 
-def pipeline_brief(task, stage=None, run_id=None):
+def pipeline_brief(task, stage=None, run_id=None, verbose=False):
     task_dir = task_dir_for(task)
-    result = tail_module.brief(task_dir, stage=stage, run_id=run_id)
+    result = tail_module.brief(task_dir, stage=stage, run_id=run_id, verbose=verbose)
     return EXIT_SUCCESS if result == "ok" else EXIT_BLOCKED
 
 
@@ -363,6 +363,7 @@ def pipeline_run_background(task, allow_dirty=False):
     code = launch_background(task, argv_tail, "background_run.log")
     print("follow with: catenna tail %s" % task)
     print("check status: catenna status %s" % task)
+    print("for more detail: catenna report %s" % task)
     return code
 
 
