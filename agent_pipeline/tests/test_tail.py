@@ -44,6 +44,12 @@ class TailTests(unittest.TestCase):
             )
         return stdout_path
 
+    def write_running_sidecar(self, stdout_path):
+        stdout_path.with_suffix(".json").write_text(
+            json.dumps({"status": "running", "stdout_path": str(stdout_path)}),
+            encoding="utf-8",
+        )
+
     def write_verification_run(self, base, text, with_metadata=True, mtime_offset=0):
         self.verification_runs_dir.mkdir(parents=True)
         stdout_path = self.verification_runs_dir / (base + ".stdout")
@@ -58,16 +64,27 @@ class TailTests(unittest.TestCase):
     def test_locate_prefers_in_progress_run(self):
         self.write_run("04-pass-1-attempt-1-claude-run-a", CLAUDE_LINES, with_metadata=True, mtime_offset=-10)
         in_progress = self.write_run("05-pass-1-attempt-1-codex-run-b", CLAUDE_LINES, with_metadata=False)
+        self.write_running_sidecar(in_progress)
         found = tail.locate(self.task_dir)
         self.assertEqual(found, in_progress)
 
     def test_locate_unfiltered_scans_verification_runs(self):
         self.write_run("04-pass-1-attempt-1-claude-run-a", CLAUDE_LINES, with_metadata=True, mtime_offset=-10)
         verify = self.write_verification_run("unit_tests-run-b", "ok\n", with_metadata=False)
+        self.write_running_sidecar(verify)
 
         found = tail.locate(self.task_dir)
 
         self.assertEqual(found, verify)
+
+    def test_locate_does_not_treat_missing_sidecar_as_in_progress(self):
+        orphan = self.write_run("05-pass-1-attempt-1-codex-orphan", CLAUDE_LINES, with_metadata=False, mtime_offset=-10)
+        completed = self.write_run("04-pass-1-attempt-1-claude-complete", CLAUDE_LINES, with_metadata=True)
+
+        found = tail.locate(self.task_dir)
+
+        self.assertEqual(found, completed)
+        self.assertNotEqual(found, orphan)
 
     def test_locate_filters_remain_pipeline_run_only(self):
         self.write_verification_run("05-pass-1-attempt-1-claude-run-a", "verification\n", with_metadata=False)
@@ -229,13 +246,14 @@ class TailTests(unittest.TestCase):
         stdout_path = self.runs_dir / "04-pass-1-attempt-1-claude-run-a.stdout"
         stdout_path.write_text(CLAUDE_LINES[0] + "\n", encoding="utf-8")
         metadata_path = self.runs_dir / "04-pass-1-attempt-1-claude-run-a.json"
+        self.write_running_sidecar(stdout_path)
 
         def append_and_finish():
             time.sleep(0.2)
             with open(str(stdout_path), "a", encoding="utf-8") as handle:
                 handle.write(CLAUDE_LINES[1] + "\n")
             time.sleep(0.2)
-            metadata_path.write_text(json.dumps({"stage": "04"}), encoding="utf-8")
+            metadata_path.write_text(json.dumps({"stage": "04", "exit_code": 0}), encoding="utf-8")
 
         thread = threading.Thread(target=append_and_finish)
         thread.start()
@@ -253,11 +271,12 @@ class TailTests(unittest.TestCase):
         state_obj["state"] = "running"
         write_state_atomic(self.task_dir, state_obj)
         stdout_path = self.write_run("04-pass-1-attempt-1-claude-run-a", CLAUDE_LINES, with_metadata=False, mtime_offset=-10)
-        stdout_path.with_suffix(".json").write_text(json.dumps({"stage": "04"}), encoding="utf-8")
+        stdout_path.with_suffix(".json").write_text(json.dumps({"stage": "04", "exit_code": 0}), encoding="utf-8")
 
         def add_verification_and_finish():
             time.sleep(0.12)
             verify_path = self.write_verification_run("unit_tests-run-b", "first line\npartial", with_metadata=False)
+            self.write_running_sidecar(verify_path)
             time.sleep(0.12)
             verify_path.with_suffix(".json").write_text(json.dumps({"name": "unit_tests", "status": "passed"}), encoding="utf-8")
             (self.task_dir / "05_verification_report.md").write_text("# report\n", encoding="utf-8")
@@ -280,7 +299,7 @@ class TailTests(unittest.TestCase):
         state_obj["state"] = "awaiting_human_test"
         write_state_atomic(self.task_dir, state_obj)
         stdout_path = self.write_run("04-pass-1-attempt-1-claude-run-a", CLAUDE_LINES, with_metadata=False)
-        stdout_path.with_suffix(".json").write_text(json.dumps({"stage": "04"}), encoding="utf-8")
+        stdout_path.with_suffix(".json").write_text(json.dumps({"stage": "04", "exit_code": 0}), encoding="utf-8")
 
         lines = []
         result = tail.follow(self.task_dir, poll_interval=0.01, print_fn=lines.append, max_wait_seconds=1)
@@ -296,7 +315,7 @@ class TailTests(unittest.TestCase):
         state_obj["state"] = "blocked"
         write_state_atomic(self.task_dir, state_obj)
         stdout_path = self.write_run("04-pass-1-attempt-1-claude-run-a", CLAUDE_LINES, with_metadata=False)
-        stdout_path.with_suffix(".json").write_text(json.dumps({"stage": "04"}), encoding="utf-8")
+        stdout_path.with_suffix(".json").write_text(json.dumps({"stage": "04", "exit_code": 0}), encoding="utf-8")
 
         lines = []
         result = tail.follow(self.task_dir, poll_interval=0.01, print_fn=lines.append, max_wait_seconds=1)
@@ -308,7 +327,7 @@ class TailTests(unittest.TestCase):
         orchestrator_dir(self.task_dir).mkdir(parents=True, exist_ok=True)
         (orchestrator_dir(self.task_dir) / "state.json").write_text("not json", encoding="utf-8")
         stdout_path = self.write_run("04-pass-1-attempt-1-claude-run-a", CLAUDE_LINES, with_metadata=False)
-        stdout_path.with_suffix(".json").write_text(json.dumps({"stage": "04"}), encoding="utf-8")
+        stdout_path.with_suffix(".json").write_text(json.dumps({"stage": "04", "exit_code": 0}), encoding="utf-8")
 
         lines = []
         result = tail.follow(self.task_dir, poll_interval=0.01, print_fn=lines.append, max_wait_seconds=1)
@@ -337,12 +356,47 @@ class TailTests(unittest.TestCase):
         self.assertIn("verification complete", "\n".join(lines))
 
     def test_follow_times_out_if_run_never_completes(self):
-        self.runs_dir.joinpath("04-pass-1-attempt-1-claude-run-a.stdout").write_text(
+        stdout_path = self.runs_dir.joinpath("04-pass-1-attempt-1-claude-run-a.stdout")
+        stdout_path.write_text(
             CLAUDE_LINES[0] + "\n", encoding="utf-8"
         )
+        self.write_running_sidecar(stdout_path)
         lines = []
         result = tail.follow(self.task_dir, poll_interval=0.05, print_fn=lines.append, max_wait_seconds=0.2)
         self.assertEqual(result, "timed_out")
+
+    def test_follow_reports_missing_sidecar_as_corrupt(self):
+        self.runs_dir.joinpath("04-pass-1-attempt-1-claude-orphan.stdout").write_text(
+            CLAUDE_LINES[0] + "\n", encoding="utf-8"
+        )
+        lines = []
+        result = tail.follow(self.task_dir, stage="04", poll_interval=0.01, print_fn=lines.append, max_wait_seconds=1)
+        self.assertEqual(result, "orphaned")
+        self.assertIn("metadata sidecar missing", "\n".join(lines))
+
+    def test_follow_reports_malformed_sidecar_as_corrupt(self):
+        stdout_path = self.runs_dir.joinpath("04-pass-1-attempt-1-claude-bad.stdout")
+        stdout_path.write_text(CLAUDE_LINES[0] + "\n", encoding="utf-8")
+        stdout_path.with_suffix(".json").write_text("not json", encoding="utf-8")
+        lines = []
+        result = tail.follow(self.task_dir, stage="04", poll_interval=0.01, print_fn=lines.append, max_wait_seconds=1)
+        self.assertEqual(result, "corrupt_metadata")
+        self.assertIn("metadata sidecar malformed", "\n".join(lines))
+
+    def test_brief_reports_missing_sidecar_as_orphaned_corrupt(self):
+        self.write_run("04-pass-1-attempt-1-claude-orphan", CLAUDE_LINES, with_metadata=False)
+        lines = []
+        result = tail.brief(self.task_dir, print_fn=lines.append)
+        self.assertEqual(result, "ok")
+        self.assertIn("status: orphaned/corrupt (metadata sidecar missing", "\n".join(lines))
+
+    def test_brief_reports_running_sidecar_as_in_progress(self):
+        stdout_path = self.write_run("04-pass-1-attempt-1-claude-running", CLAUDE_LINES, with_metadata=False)
+        self.write_running_sidecar(stdout_path)
+        lines = []
+        result = tail.brief(self.task_dir, print_fn=lines.append)
+        self.assertEqual(result, "ok")
+        self.assertIn("status: in progress", "\n".join(lines))
 
     def test_follow_handles_no_runs(self):
         lines = []
