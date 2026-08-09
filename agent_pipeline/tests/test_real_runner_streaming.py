@@ -110,6 +110,35 @@ class StreamingRunnerTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(Path(result["candidate_artifact_path"]).read_text(encoding="utf-8"), "codex final answer via output-last-message")
 
+    def test_agent_run_writes_running_sidecar_then_final_sidecar(self):
+        fake = self.write_fake(
+            """
+            import json
+            import sys
+            from pathlib import Path
+            out_path = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            base = out_path.name[:-len(".candidate.md")]
+            sidecar = out_path.parent / ".orchestrator" / "runs" / (base + ".json")
+            running = json.loads(sidecar.read_text(encoding="utf-8"))
+            assert running["status"] == "running"
+            assert running["run_id"] == "run-sidecar"
+            with open(out_path, "w") as handle:
+                handle.write("codex final answer")
+            print('{"type":"thread.started"}')
+            print('{"type":"turn.completed"}')
+            """
+        )
+        config = self.base_config("codex", fake)
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-codex-run-sidecar.candidate.md"
+
+        result = invoke_agent(self.task_dir, config, "codex", "04", "read-only", self.prompt_path, candidate_path, "run-sidecar")
+
+        sidecar = candidate_path.parent / ".orchestrator" / "runs" / "04-pass-1-attempt-1-codex-run-sidecar.json"
+        final = json.loads(sidecar.read_text(encoding="utf-8"))
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(final["status"], "passed")
+        self.assertEqual(final["run_id"], "run-sidecar")
+
     def test_plain_text_output_without_json_still_falls_back_to_raw_stdout(self):
         # An agent CLI that ignores the streaming flags (or a legacy
         # fixture) must keep working exactly as before: raw stdout dumped

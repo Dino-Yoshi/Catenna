@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from .locking import lock_path, pid_live
-from .real_runner import run_to_files
+from .real_runner import run_to_files, write_json_atomic
 from .state import orchestrator_dir
 
 
@@ -54,7 +54,21 @@ def verification_runs_dir(task_dir):
 
 
 def _write_check_sidecar(stdout_path, result):
-    Path(stdout_path).with_suffix(".json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(Path(stdout_path).with_suffix(".json"), result)
+
+
+def _write_running_check_sidecar(stdout_path, name, argv, started_at):
+    write_json_atomic(
+        Path(stdout_path).with_suffix(".json"),
+        {
+            "name": name,
+            "status": "running",
+            "command": list(argv),
+            "started_at": started_at,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(Path(stdout_path).with_suffix(".stderr")),
+        },
+    )
 
 
 def check_concurrency_guard(task_dir, allow_pid=None):
@@ -90,6 +104,7 @@ def run_unit_tests(repo_root, runs_dir, timeout_seconds=600):
     stderr_path = runs_dir / ("unit_tests-%s.stderr" % stamp)
     argv = [python_executable()] + UNIT_TEST_ARGS
     started = time.time()
+    _write_running_check_sidecar(stdout_path, "unit_tests", argv, started)
     exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=PACKAGE_ROOT)
     duration = time.time() - started
     summary = parse_unittest_summary(safe_read(stderr_path))
@@ -115,6 +130,7 @@ def run_mock_pipeline(repo_root, runs_dir, timeout_seconds=120):
     stderr_path = runs_dir / ("mock_pipeline-%s.stderr" % stamp)
     argv = [python_executable()] + MOCK_PIPELINE_ARGS
     started = time.time()
+    _write_running_check_sidecar(stdout_path, "mock_pipeline", argv, started)
     exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=PACKAGE_ROOT)
     duration = time.time() - started
     status = "passed" if exit_code == 0 and not timed_out else "failed"
@@ -150,6 +166,7 @@ def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overr
         env.update(env_overrides)
     argv = [str(gradlew), "--no-daemon", gradle_task]
     started = time.time()
+    _write_running_check_sidecar(stdout_path, "gradle_" + gradle_task, argv, started)
     exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=repo_root, env=env)
     duration = time.time() - started
     status = "passed" if exit_code == 0 and not timed_out else "failed"
@@ -177,6 +194,7 @@ def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None)
         argv = list(command["argv"])
         timeout_seconds = command.get("timeout_seconds", DRIVEN_PROJECT_DEFAULT_TIMEOUT_SECONDS)
         started = time.time()
+        _write_running_check_sidecar(stdout_path, "driven_project_" + name, argv, started)
         try:
             exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=repo_root)
         except OSError as exc:

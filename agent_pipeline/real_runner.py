@@ -74,6 +74,25 @@ def invoke_agent(
         nonlocal real_process_invoked
         real_process_invoked = True
 
+    write_json_atomic(
+        metadata_path,
+        {
+            "agent": agent,
+            "provider": agent,
+            "stage": stage_key,
+            "execution_mode": execution_mode,
+            "started_at": started,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "run_id": run_id,
+            "pass_number": pass_number,
+            "attempt_number": attempt_number,
+            "attempt_kind": attempt_kind,
+            "retry_reason": retry_reason,
+            "status": "running",
+        },
+    )
+
     try:
         argv, metadata_argv = build_argv(agent, detail, execution_mode, prompt_path, candidate_path, config, stage_key)
         if not command_available(argv[0]):
@@ -144,15 +163,24 @@ def invoke_agent(
         "attempt_number": attempt_number,
         "attempt_kind": attempt_kind,
         "retry_reason": retry_reason,
+        "status": "passed" if exit_code == 0 and failure_class is None else "failed",
         "usage": usage_data,
         "reasoning_path": str(reasoning_path) if reasoning_path else None,
     }
-    metadata_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(metadata_path, result)
     result["metadata_path"] = str(metadata_path)
     if ledger_path is not None:
         entry = usage_module.build_entry(task, run_id, stage_key, agent, result, usage_data)
         usage_module.append_entry(ledger_path, entry)
     return result
+
+
+def write_json_atomic(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp-%s-%s" % (os.getpid(), int(time.time() * 1000000)))
+    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(str(tmp_path), str(path))
 
 
 def run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, cwd=None, env=None, on_launch=None):

@@ -374,7 +374,8 @@ def pipeline_verify_background(task, run_build=False):
     code = launch_background(task, argv_tail, "background_verify.log")
     report_path = task_dir_for(task) / "05_verification_report.md"
     print("verification report: %s" % report_path)
-    print("verify output is written to the background log/report; catenna tail does not cover verify output")
+    print("follow verification stdout with: catenna tail %s" % task)
+    print("full background launcher log: %s" % (task_dir_for(task) / ".orchestrator" / "background_verify.log"))
     return code
 
 
