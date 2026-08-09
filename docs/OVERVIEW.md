@@ -4,16 +4,20 @@ Living document for `agent_pipeline/` — "Catenna", the Python orchestrator —
 and how it relates to the legacy bash pipeline (`Makefile`/`Makefile.legacy`)
 that lives in each *driven project*'s own repo. This repo is Catenna's
 standalone home and contains no Makefile of its own; invoke it via the
-installed `catenna <command> [task] ...` shortcut (`pip install -e .`), or
-directly as `python3 -m agent_pipeline.cli <command> [task] ...` — same
-code, same commands, both forms fully supported (see "Command table"
-below).
+installed `catenna <command> [task] ...` shortcut (`pip install -e .` or
+`pip install .`), or directly as
+`python3 -m agent_pipeline.cli <command> [task] ...` — same code, same
+commands, both forms fully supported (see "Command table" below).
 
 This snapshot reflects the system through Phase 5 of the original redesign
 (history below) plus the post-extraction hardening pass that has followed
 on branch `v1-fixes`/`v1-cleanup`/`v1-simplification` (see "Post-Phase-5
 hardening" below and the Changelog at the bottom). 339 tests, all green:
 `python3 -m unittest discover -s agent_pipeline/tests`.
+
+Non-editable installs include Catenna's runtime mock fixtures as package
+data and include `agent_pipeline/tests` for installed verification
+commands.
 
 **Relocation note (2026-08-05):** Phases 0-5 below were built and tested
 while this code lived at `tools/agent_pipeline/` (and docs at
