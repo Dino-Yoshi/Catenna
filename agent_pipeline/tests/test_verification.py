@@ -581,6 +581,21 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
         self.assertTrue(report["driven_project_verified"])
         self.assertIn("driven_project_acceptance", [check["name"] for check in report["checks"]])
 
+    def test_skip_self_check_omits_unit_tests_and_mock_pipeline(self):
+        report = verification.run_verification(self.task_dir, self.repo_root, skip_self_check=True)
+
+        names = [check["name"] for check in report["checks"]]
+        self.assertNotIn("unit_tests", names)
+        self.assertNotIn("mock_pipeline", names)
+        self.assertIn("gradle_compileJava", names)
+
+    def test_build_implies_compile_omits_compile_when_build_runs(self):
+        report = verification.run_verification(self.task_dir, self.repo_root, run_build=True, build_implies_compile=True)
+
+        names = [check["name"] for check in report["checks"]]
+        self.assertIn("gradle_build", names)
+        self.assertNotIn("gradle_compileJava", names)
+
     def test_concurrency_guard_blocks_run_verification(self):
         directory = orchestrator_dir(self.task_dir)
         directory.mkdir(parents=True, exist_ok=True)
