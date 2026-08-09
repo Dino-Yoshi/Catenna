@@ -79,7 +79,11 @@ DEFAULT_CONFIG = {
         "overseer": 10,
     },
     "allow_degraded_same_agent_review": False,
-    "verification": {"driven_project_commands": []},
+    "verification": {
+        "driven_project_commands": [],
+        "skip_self_check": False,
+        "build_implies_compile": False,
+    },
 }
 
 
@@ -163,6 +167,9 @@ def validate_verification_config(config):
     verification = config.get("verification", {})
     if not isinstance(verification, Mapping):
         raise ConfigError("verification must be a mapping")
+    for field in ("skip_self_check", "build_implies_compile"):
+        if field in verification and not isinstance(verification.get(field), bool):
+            raise ConfigError("verification.%s must be a boolean" % field)
     commands = verification.get("driven_project_commands", [])
     if not isinstance(commands, list):
         raise ConfigError("verification.driven_project_commands must be a list")
@@ -193,6 +200,9 @@ def validate_role_agent_references(config):
     for role_name, role in config.get("roles", {}).items():
         if not isinstance(role, dict):
             raise ConfigError("role %s must be a mapping" % role_name)
+        for field in ("model_override", "effort_override"):
+            if field in role and not isinstance(role.get(field), str):
+                raise ConfigError("role %s %s must be a string" % (role_name, field))
         primary = role.get("primary")
         if primary not in agents:
             raise ConfigError("role %s primary references unknown agent %r" % (role_name, primary))
