@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -87,6 +88,8 @@ def invoke_agent(
             "provider": agent,
             "stage": stage_key,
             "execution_mode": execution_mode,
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
             "started_at": started,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
