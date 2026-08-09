@@ -1,7 +1,7 @@
 """Read-only live/post-hoc visibility into a task's agent and verification runs.
 
-Reads `.orchestrator/runs/<base>.stdout` (+ `.json` sidecar once the run
-finishes) written by real_runner.invoke_agent, and unfiltered tails can also
+Reads `.orchestrator/runs/<base>.stdout` (+ `.json` sidecar state) written
+by real_runner.invoke_agent, and unfiltered tails can also
 follow `.orchestrator/verification_runs/<base>.stdout` files. Never mutates
 task state and never acquires the task lock, so `pipeline-tail`/`pipeline-brief`
 are safe to run concurrently with an in-progress `pipeline-run`.
@@ -60,16 +60,16 @@ def locate(task_dir, stage=None, run_id=None):
     """Pick the target .stdout file.
 
     With an explicit stage/run_id filter: newest matching pipeline run.
-    Otherwise: the newest pipeline or verification file still missing its
-    .json sidecar (in progress), else the newest file overall. None if no
-    stdout files exist.
+    Otherwise: the newest pipeline or verification file with a running
+    .json sidecar, else the newest file overall. None if no stdout files
+    exist.
     """
     if stage or run_id:
         candidates = list_run_files(task_dir)
         candidates = [p for p in candidates if _matches(p, stage, run_id)]
         return candidates[0] if candidates else None
     candidates = sorted(list_run_files(task_dir) + list_verification_run_files(task_dir), key=lambda p: p.stat().st_mtime, reverse=True)
-    in_progress = [p for p in candidates if not p.with_suffix(".json").exists()]
+    in_progress = [p for p in candidates if _sidecar_status(p)[0] == "running"]
     if in_progress:
         return in_progress[0]
     return candidates[0] if candidates else None
@@ -80,20 +80,60 @@ def _locate_pipeline_run(task_dir, stage=None, run_id=None):
     if stage or run_id:
         candidates = [p for p in candidates if _matches(p, stage, run_id)]
         return candidates[0] if candidates else None
-    in_progress = [p for p in candidates if not p.with_suffix(".json").exists()]
+    in_progress = [p for p in candidates if _sidecar_status(p)[0] == "running"]
     if in_progress:
         return in_progress[0]
     return candidates[0] if candidates else None
 
 
 def _sidecar(stdout_path):
+    status_name, metadata, _message = _sidecar_status(stdout_path)
+    return metadata if status_name == "complete" else None
+
+
+def _sidecar_status(stdout_path):
     metadata_path = stdout_path.with_suffix(".json")
     if not metadata_path.exists():
-        return None
+        return "missing", None, "metadata sidecar missing: %s" % metadata_path.name
     try:
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
-    except Exception:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return "malformed", None, "metadata sidecar malformed: %s (%s)" % (metadata_path.name, exc)
+    if not isinstance(metadata, dict):
+        return "malformed", None, "metadata sidecar malformed: %s (expected JSON object)" % metadata_path.name
+    status_value = metadata.get("status")
+    if status_value == "running":
+        return "running", metadata, None
+    if status_value:
+        return "complete", metadata, None
+    if _looks_like_legacy_complete(metadata):
+        return "complete", metadata, None
+    return "malformed", None, "metadata sidecar incomplete: %s (missing status and final metadata)" % metadata_path.name
+
+
+def _looks_like_legacy_complete(metadata):
+    final_keys = ("exit_code", "ended_at", "duration_seconds", "failure_class")
+    if any(key in metadata for key in final_keys):
+        return True
+    return False
+
+
+def _print_sidecar_problem(stdout_path, print_fn):
+    status_name, _metadata, message = _sidecar_status(stdout_path)
+    if status_name == "missing":
+        print_fn("run artifact orphaned/corrupt: %s" % message)
+        return "orphaned"
+    if status_name == "malformed":
+        print_fn("run artifact corrupt: %s" % message)
+        return "corrupt_metadata"
+    return None
+
+
+def _sidecar_complete(stdout_path):
+    status_name, _metadata, _message = _sidecar_status(stdout_path)
+    if status_name in ("missing", "malformed"):
         return None
+    return status_name == "complete"
 
 
 def _timed_out(waited, max_wait_seconds):
@@ -188,7 +228,10 @@ def follow(task_dir, stage=None, run_id=None, poll_interval=0.4, print_fn=print,
                                 print_fn(summary)
                         waited = 0.0
                         continue
-                    if _sidecar(stdout_path) is not None:
+                    sidecar_complete = _sidecar_complete(stdout_path)
+                    if sidecar_complete is None:
+                        return _print_sidecar_problem(stdout_path, print_fn)
+                    if sidecar_complete:
                         if source == "verification_runs":
                             buffer = _flush_verification_buffer(buffer, print_fn)
                         if not unfiltered:
@@ -243,6 +286,7 @@ def brief(task_dir, stage=None, run_id=None, print_fn=print, verbose=False):
 
     print_fn("run: %s" % stdout_path.name)
     print_fn("agent: %s" % (agent or "unknown"))
+    sidecar_status, _metadata, message = _sidecar_status(stdout_path)
     if metadata:
         print_fn("stage: %s" % metadata.get("stage"))
         duration_seconds = metadata.get("duration_seconds")
@@ -259,8 +303,12 @@ def brief(task_dir, stage=None, run_id=None, print_fn=print, verbose=False):
             if reasoning_text:
                 excerpt = reasoning_text if verbose else reasoning_text[:300] + ("..." if len(reasoning_text) > 300 else "")
                 print_fn("reasoning: " + excerpt.replace("\n", " ").strip())
+    elif sidecar_status == "running":
+        print_fn("status: in progress")
+    elif sidecar_status == "missing":
+        print_fn("status: orphaned/corrupt (%s)" % message)
     else:
-        print_fn("status: in progress (no metadata sidecar yet)")
+        print_fn("status: orphaned/corrupt (%s)" % message)
 
     counts = {}
     for line in stdout_text.splitlines():
