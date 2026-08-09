@@ -250,7 +250,11 @@ Key modules:
   is `true` only if at least one such command is configured, attempted, and
   none failed; zero configured commands makes Stage 6 auto-verify
   categorically ineligible for that project regardless of Catenna's own
-  test results (see "Stage 6 auto-verification" and "Known gaps"). All
+  test results. The report and `catenna verify` output also include
+  `driven_project_checks_configured`, `driven_project_check_count`, and
+  `driven_project_verification_reason` so "no commands configured" is
+  distinguishable from a configured command failure (see "Stage 6
+  auto-verification" and "Known gaps"). All
   subprocess checks reuse `real_runner.run_to_files` rather than an ad-hoc
   subprocess pattern. Writes `<task>/05_verification_report.{json,md}` and,
   when `05_implementation_manifest.json` exists for the task, fills in that
