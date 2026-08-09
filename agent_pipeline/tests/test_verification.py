@@ -444,7 +444,7 @@ class RunUnitTestsAndMockPipelineIntegrationTests(unittest.TestCase):
     def test_run_mock_pipeline_reports_real_exit_status(self):
         # `python3 -m agent_pipeline.cli mock-test` used to fail
         # deterministically against stale fixture expectations in
-        # .agent-pipeline/fixtures/mock_scenarios.json (pre-existing,
+        # agent_pipeline/fixtures/mock_scenarios.json (pre-existing,
         # confirmed unrelated to Phase 2 -- see phase-2-handoff.md "Known
         # gaps"); fixed in Phase 3 (see phase-3-handoff.md). This asserts
         # run_mock_pipeline faithfully reports the real (now passing) result.

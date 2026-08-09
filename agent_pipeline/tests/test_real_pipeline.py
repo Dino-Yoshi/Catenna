@@ -2,6 +2,7 @@ from __future__ import print_function
 
 import json
 import os
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -24,13 +25,18 @@ class RealPipelineTests(unittest.TestCase):
         (self.task_dir / CONTRACTS["00"].filename).write_text(valid_artifact("00"), encoding="utf-8")
         (self.task_dir / CONTRACTS["01"].filename).write_text(valid_artifact("01"), encoding="utf-8")
         self.fake = self.write_fake_agent()
+        subprocess.check_call(["git", "init"], cwd=str(self.root), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.original_tasks_root = controller.TASKS_ROOT
         self.original_usage_root = controller.USAGE_ROOT
+        self.original_repo_root = controller.REPO_ROOT
         self.original_load_config = controller.load_config
         self.original_run_verification = controller.verification.run_verification
+        self.original_source_snapshot = controller.source_snapshot
         controller.TASKS_ROOT = self.root
         controller.USAGE_ROOT = self.root / "usage"
+        controller.REPO_ROOT = self.root
         controller.load_config = lambda: self.config()
+        controller.source_snapshot = lambda: ""
         # Real run_verification would shell out to a real `python3 -m unittest
         # discover`/`./gradlew` against the actual repo -- these tests fake
         # every agent CLI and must not depend on (or pay for) that. Default to
@@ -41,8 +47,10 @@ class RealPipelineTests(unittest.TestCase):
     def tearDown(self):
         controller.TASKS_ROOT = self.original_tasks_root
         controller.USAGE_ROOT = self.original_usage_root
+        controller.REPO_ROOT = self.original_repo_root
         controller.load_config = self.original_load_config
         controller.verification.run_verification = self.original_run_verification
+        controller.source_snapshot = self.original_source_snapshot
         self.tmp.cleanup()
 
     def verification_report(self, overall_status="incomplete", coverage_status="no_data", driven_project_verified=None):

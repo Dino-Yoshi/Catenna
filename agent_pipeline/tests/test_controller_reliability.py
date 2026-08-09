@@ -148,7 +148,7 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertIn("04_final_brief_audit.md: stage=04_gate status=valid reason=valid", output)
 
     def test_mock_test_passes_against_committed_fixtures(self):
-        # Guards against .agent-pipeline/fixtures/mock_scenarios.json drifting
+        # Guards against agent_pipeline/fixtures/mock_scenarios.json drifting
         # out of sync with policies.py/controller.py again -- this fixture
         # drift previously went unnoticed by `unittest discover` entirely
         # because nothing here called controller.mock_test() directly (see
@@ -446,7 +446,10 @@ class ControllerReliabilityTests(unittest.TestCase):
                 }
 
             controller.invoke_agent = fake_invoke_agent
+            original_source_snapshot = controller.source_snapshot
             self.addCleanup(lambda: setattr(controller, "invoke_agent", original))
+            self.addCleanup(lambda: setattr(controller, "source_snapshot", original_source_snapshot))
+            controller.source_snapshot = lambda: ""
 
             controller.invoke_stage(
                 task_dir,
