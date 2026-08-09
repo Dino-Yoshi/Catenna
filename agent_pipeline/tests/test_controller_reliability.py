@@ -45,6 +45,12 @@ class ControllerReliabilityTests(unittest.TestCase):
             code = controller.pipeline_verify(task)
         return code, output.getvalue()
 
+    def capture_usage(self, **kwargs):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = controller.pipeline_usage(**kwargs)
+        return code, output.getvalue()
+
     def capture_run_background(self, task, allow_dirty=False):
         output = io.StringIO()
         with redirect_stdout(output):
@@ -244,7 +250,7 @@ class ControllerReliabilityTests(unittest.TestCase):
                 (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
             state = new_state(task, "run-test")
 
-            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False):
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
                 if stage_key == "05":
                     (task_dir_arg / CONTRACTS["05"].filename).write_text(valid_artifact("05"), encoding="utf-8")
                 return EXIT_SUCCESS
@@ -318,8 +324,8 @@ class ControllerReliabilityTests(unittest.TestCase):
             state["stage_gate_passes"] = [{"pass": 1, "accepted": False}]
             calls = []
 
-            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False):
-                calls.append((stage_key, pass_number, force))
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
+                calls.append((stage_key, pass_number, force, extra_context))
                 (task_dir_arg / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
                 if stage_key not in state_arg["completed_stages"]:
                     state_arg["completed_stages"].append(stage_key)
@@ -332,7 +338,10 @@ class ControllerReliabilityTests(unittest.TestCase):
             code = controller.run_stage4_gate_loop(task_dir, state, {"max_gate_passes": 2}, {})
 
             self.assertEqual(code, EXIT_SUCCESS)
-            self.assertEqual(calls, [("04", 2, True), ("04_gate", 2, True)])
+            self.assertEqual(calls[0][:3], ("04", 2, True))
+            self.assertIn("Latest Stage 04 gate rejection feedback:", calls[0][3])
+            self.assertIn("ready_for_implementation: false", calls[0][3])
+            self.assertEqual(calls[1], ("04_gate", 2, True, None))
 
     def test_stage4_gate_loop_pass1_force_still_tracks_completed_stages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -352,8 +361,8 @@ class ControllerReliabilityTests(unittest.TestCase):
             reconcile_artifacts(task_dir, state)
             calls = []
 
-            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False):
-                calls.append((stage_key, pass_number, force))
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
+                calls.append((stage_key, pass_number, force, extra_context))
                 return EXIT_SUCCESS
 
             original = controller.ensure_real_stage
@@ -363,7 +372,7 @@ class ControllerReliabilityTests(unittest.TestCase):
             code = controller.run_stage4_gate_loop(task_dir, state, {"max_gate_passes": 1}, {})
 
             self.assertEqual(code, EXIT_BLOCKED)
-            self.assertEqual(calls, [("04", 1, False), ("04_gate", 1, False)])
+            self.assertEqual(calls, [("04", 1, False, None), ("04_gate", 1, False, None)])
 
     def test_stage4_gate_loop_archives_brief_before_identical_revision_block(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -375,7 +384,7 @@ class ControllerReliabilityTests(unittest.TestCase):
             state = new_state(task, "run-test")
             calls = {"04_gate": 0}
 
-            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False):
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
                 if stage_key == "04":
                     (task_dir_arg / CONTRACTS["04"].filename).write_text(valid_artifact("04"), encoding="utf-8")
                     if "04" not in state_arg["completed_stages"]:
@@ -407,6 +416,53 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertTrue((task_dir / "04_final_codex_brief.pass-2.md").exists())
             self.assertTrue((task_dir / "04_final_brief_audit.pass-1.md").exists())
             self.assertFalse((task_dir / "04_final_brief_audit.pass-2.md").exists())
+
+    def test_stage4_retry_context_is_omitted_when_gate_file_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-missing-gate-feedback"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            state = new_state(task, "run-test")
+            state["stage_gate_passes"] = [{"pass": 1, "accepted": False}]
+
+            self.assertIsNone(controller.stage4_rejected_gate_context(task_dir, state, 2))
+
+    def test_invoke_stage_appends_extra_context_and_completion_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "task"
+            task_dir.mkdir(parents=True)
+            state = new_state("task", "run-test")
+            seen = {}
+            original = controller.invoke_agent
+
+            def fake_invoke_agent(task_dir_arg, config_arg, agent, stage_key, execution_mode, prompt_path, candidate_path, run_id, *args, **kwargs):
+                seen["prompt"] = Path(prompt_path).read_text(encoding="utf-8")
+                Path(candidate_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(candidate_path).write_text(valid_artifact(stage_key), encoding="utf-8")
+                return {
+                    "candidate_artifact_path": str(candidate_path),
+                    "failure_class": None,
+                    "exit_code": 0,
+                }
+
+            controller.invoke_agent = fake_invoke_agent
+            self.addCleanup(lambda: setattr(controller, "invoke_agent", original))
+
+            controller.invoke_stage(
+                task_dir,
+                state,
+                {"usage_ledger": {"enabled": False}, "reasoning_capture": {"enabled": True}},
+                "04",
+                "read-only",
+                "codex",
+                2,
+                completion_for="partial artifact",
+                extra_context="gate feedback",
+            )
+
+            self.assertIn("gate feedback", seen["prompt"])
+            self.assertIn("Complete the preserved partial artifact below", seen["prompt"])
+            self.assertLess(seen["prompt"].index("gate feedback"), seen["prompt"].index("Complete the preserved partial artifact below"))
 
     def test_normalize_stage_output_strips_commentary_before_stage7_heading(self):
         output = "Provider note.\n\n# Stage 7 - Diff review\n\nBody.\n"
@@ -447,6 +503,13 @@ class ControllerReliabilityTests(unittest.TestCase):
         for section in ("Verification commands", "Stop conditions"):
             self.assertIn("## " + section, text)
         self.assertIn("not structurally required", text)
+
+    def test_repository_analysis_budget_is_added_only_to_requested_stage_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "task"
+            for stage_key in ("03", "04", "04_gate"):
+                self.assertIn("Repository-analysis budget:", prompts.prompt_text(task_dir, "task", stage_key))
+            self.assertNotIn("Repository-analysis budget:", prompts.prompt_text(task_dir, "task", "05"))
 
     def test_pipeline_verify_treats_none_duration_as_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -498,6 +561,50 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS, output)
             self.assertIs(seen["driven_project_commands"], driven_commands)
+
+    def test_pipeline_verify_passes_verification_toggles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+            seen = {}
+
+            original = controller.verification.run_verification
+            original_load_config = controller.load_config
+            controller.load_config = lambda: {"verification": {"driven_project_commands": [], "skip_self_check": True, "build_implies_compile": True}}
+
+            def fake_run_verification(*args, **kwargs):
+                seen.update(kwargs)
+                return {
+                    "overall_status": "passed",
+                    "checks": [],
+                    "test_coverage_delta_signal": {"status": "not_checked"},
+                    "report_paths": {"md_path": str(root / "report.md")},
+                }
+
+            controller.verification.run_verification = fake_run_verification
+            self.addCleanup(lambda: setattr(controller.verification, "run_verification", original))
+            self.addCleanup(lambda: setattr(controller, "load_config", original_load_config))
+
+            code, output = self.capture_verify("verify-toggles")
+
+            self.assertEqual(code, EXIT_SUCCESS, output)
+            self.assertTrue(seen["skip_self_check"])
+            self.assertTrue(seen["build_implies_compile"])
+
+    def test_pipeline_usage_prints_cache_hit_for_groups_and_overall(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_usage_root(root / "usage")
+            usage.append_entry(
+                controller.usage_ledger_path(),
+                usage.build_entry("t", "r", "02", "codex", {"duration_seconds": 1.0, "failure_class": None}, {"input_tokens": 25, "cache_read_tokens": 75}),
+            )
+
+            code, output = self.capture_usage()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertIn("codex: calls=1 failures=0 duration=1.0s in=25 out=0 cost=unknown cache_hit=75.0%", output)
+            self.assertIn("overall: calls=1 failures=0 duration=1.0s cache_hit=75.0%", output)
 
     def test_pipeline_verify_reports_invalid_config_like_pipeline_run(self):
         with tempfile.TemporaryDirectory() as tmp:

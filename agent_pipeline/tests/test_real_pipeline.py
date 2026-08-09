@@ -138,12 +138,12 @@ class RealPipelineTests(unittest.TestCase):
                 elif "# Stage 5 - Implementation report" in prompt:
                     text = artifact("05")
                     stage = "05"
-                elif "# Stage 4 - Final brief audit" in prompt:
-                    text = artifact("04_gate")
-                    stage = "04_gate"
                 elif "# Stage 4 - Final implementation brief" in prompt:
                     text = artifact("04")
                     stage = "04"
+                elif "# Stage 4 - Final brief audit" in prompt:
+                    text = artifact("04_gate")
+                    stage = "04_gate"
                 elif "# Stage 3 - Specification audit" in prompt:
                     text = artifact("03")
                     stage = "03"
@@ -308,6 +308,41 @@ class RealPipelineTests(unittest.TestCase):
         self.assertIn("failed_attempt_metadata_path", pending)
         self.assertIn("completion_retry_metadata_path", pending)
 
+    def test_completion_retry_preserves_extra_context(self):
+        state = new_state(self.task, "run-test")
+        useful = "# Stage 2 - Technical specification\n\n## Summary\n\nPartial.\n"
+        completion = valid_artifact("02")
+        calls = []
+        original = controller.invoke_stage
+        results = [
+            self.stage_result("02", useful, FAILURE_CLASS_MAX_TURNS, attempt_number=1),
+            self.stage_result("02", completion, None, attempt_number=2),
+        ]
+
+        def fake_invoke(*args, **kwargs):
+            calls.append((args, kwargs))
+            return results.pop(0)
+
+        try:
+            controller.invoke_stage = fake_invoke
+            code = controller.ensure_real_stage(
+                self.task_dir,
+                state,
+                self.config(),
+                "02",
+                "read-only",
+                {},
+                extra_context="gate feedback",
+            )
+        finally:
+            controller.invoke_stage = original
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1]["extra_context"], "gate feedback")
+        self.assertEqual(calls[1][1]["extra_context"], "gate feedback")
+        self.assertEqual(calls[1][1]["completion_for"], useful)
+
     def test_real_non_owner_completed_stage_short_circuits_while_later_approval_pending(self):
         state = new_state(self.task, "run-test")
         state["state"] = "awaiting_retry_approval"
@@ -375,6 +410,24 @@ class RealPipelineTests(unittest.TestCase):
         self.assertEqual(state["last_failure"]["failure_class"], "gate_pass_limit_exhausted")
         self.assertEqual(state["completed_stages"], ["00", "01", "02", "03", "04"])
         self.assertFalse((self.task_dir / CONTRACTS["05"].filename).exists())
+
+    def test_stage6_auto_verification_passes_configured_toggles(self):
+        cfg = self.config()
+        cfg["verification"] = {"driven_project_commands": [], "skip_self_check": True, "build_implies_compile": True}
+        controller.load_config = lambda: cfg
+        seen = {}
+
+        def fake_run_verification(*args, **kwargs):
+            seen.update(kwargs)
+            return self.verification_report()
+
+        controller.verification.run_verification = fake_run_verification
+
+        code = controller.pipeline_run(self.task, allow_dirty=True)
+
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertTrue(seen["skip_self_check"])
+        self.assertTrue(seen["build_implies_compile"])
 
     def test_identical_stage4_revision_blocks_as_gate_rejected(self):
         os.environ["FAKE_GATE_REJECT"] = "1"

@@ -100,7 +100,7 @@ _USAGE_TOTAL_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "ca
 
 
 def _new_bucket():
-    bucket = {"count": 0, "failures": 0, "duration_seconds": 0.0, "total_cost_usd": 0.0, "tokens_known": False, "cost_known": False}
+    bucket = {"count": 0, "failures": 0, "duration_seconds": 0.0, "total_cost_usd": 0.0, "tokens_known": False, "cost_known": False, "cache_hit_ratio": None}
     for field in _USAGE_TOTAL_FIELDS:
         bucket[field] = 0
     return bucket
@@ -139,7 +139,18 @@ def summarize(entries, group_by="agent"):
         bucket = groups.setdefault(key, _new_bucket())
         _accumulate(bucket, entry)
         _accumulate(overall, entry)
+    for bucket in list(groups.values()) + [overall]:
+        _finalize_bucket(bucket)
     return {"groups": groups, "overall": overall}
+
+
+def _finalize_bucket(bucket):
+    denominator = bucket["input_tokens"] + bucket["cache_read_tokens"]
+    if bucket["tokens_known"] and denominator:
+        bucket["cache_hit_ratio"] = float(bucket["cache_read_tokens"]) / float(denominator)
+    else:
+        bucket["cache_hit_ratio"] = None
+    return bucket
 
 
 # ---------------------------------------------------------------------------

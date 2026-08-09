@@ -90,6 +90,36 @@ class ReasoningCaptureConfigTests(unittest.TestCase):
 
     def test_default_verification_config_has_no_driven_project_commands(self):
         self.assertEqual(config.DEFAULT_CONFIG["verification"]["driven_project_commands"], [])
+        self.assertFalse(config.DEFAULT_CONFIG["verification"]["skip_self_check"])
+        self.assertFalse(config.DEFAULT_CONFIG["verification"]["build_implies_compile"])
+
+    def test_absent_verification_toggles_remain_allowed_for_loaded_configs(self):
+        cfg = config.deep_copy(config.DEFAULT_CONFIG)
+        del cfg["verification"]["skip_self_check"]
+        del cfg["verification"]["build_implies_compile"]
+        self.assertTrue(config.validate_config(cfg))
+
+    def test_verification_toggles_must_be_booleans_when_present(self):
+        for field in ("skip_self_check", "build_implies_compile"):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad["verification"][field] = "false"
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("verification." + field, str(raised.exception))
+
+    def test_role_model_and_effort_overrides_must_be_strings_when_present(self):
+        for field in ("model_override", "effort_override"):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad["roles"]["04"][field] = 123
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("role 04 " + field, str(raised.exception))
+
+    def test_role_model_and_effort_overrides_accept_strings(self):
+        cfg = config.deep_copy(config.DEFAULT_CONFIG)
+        cfg["roles"]["04"]["model_override"] = "cheap-model"
+        cfg["roles"]["04"]["effort_override"] = "low"
+        self.assertTrue(config.validate_config(cfg))
 
     def test_valid_driven_project_commands_are_accepted(self):
         cfg = config.deep_copy(config.DEFAULT_CONFIG)

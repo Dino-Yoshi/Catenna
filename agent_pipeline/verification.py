@@ -301,15 +301,20 @@ def run_verification(
     gradle_timeout=1800,
     allow_pid=None,
     driven_project_commands=None,
+    skip_self_check=False,
+    build_implies_compile=False,
 ):
     check_concurrency_guard(task_dir, allow_pid=allow_pid)
     runs_dir = verification_runs_dir(task_dir)
 
-    checks = [
-        run_unit_tests(repo_root, runs_dir, timeout_seconds=unit_test_timeout),
-        run_mock_pipeline(repo_root, runs_dir, timeout_seconds=mock_pipeline_timeout),
-        run_gradle(repo_root, runs_dir, "compileJava", timeout_seconds=gradle_timeout),
-    ]
+    checks = []
+    if not skip_self_check:
+        checks.extend([
+            run_unit_tests(repo_root, runs_dir, timeout_seconds=unit_test_timeout),
+            run_mock_pipeline(repo_root, runs_dir, timeout_seconds=mock_pipeline_timeout),
+        ])
+    if not (build_implies_compile and run_build):
+        checks.append(run_gradle(repo_root, runs_dir, "compileJava", timeout_seconds=gradle_timeout))
     if run_build:
         checks.append(run_gradle(repo_root, runs_dir, "build", timeout_seconds=gradle_timeout))
     driven_project_checks = run_driven_project_checks(repo_root, runs_dir, driven_project_commands)

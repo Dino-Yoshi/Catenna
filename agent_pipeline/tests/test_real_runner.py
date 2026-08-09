@@ -46,6 +46,13 @@ class BuildArgvCodexTests(unittest.TestCase):
         argv, _ = build_argv("codex", detail, "read-only", self.prompt_path, self.candidate_path, self.config, "04")
         self.assertEqual(argv[argv.index("--output-last-message") + 1], str(self.candidate_path))
 
+    def test_model_is_included_before_output_last_message_and_stdin_marker_stays_last(self):
+        detail = {"command": "codex", "model": "gpt-5-mini", "read_args": [], "write_args": []}
+        argv, _ = build_argv("codex", detail, "read-only", self.prompt_path, self.candidate_path, self.config, "04")
+        self.assertEqual(argv[argv.index("--model") + 1], "gpt-5-mini")
+        self.assertLess(argv.index("--model"), argv.index("--output-last-message"))
+        self.assertEqual(argv[-1], "-")
+
 
 class BuildArgvClaudeTests(unittest.TestCase):
     def setUp(self):
@@ -299,6 +306,63 @@ class ExtractCandidateTests(unittest.TestCase):
         result = extract_candidate(path, stdout, agent="claude")
         self.assertEqual(result, path)
         self.assertEqual(path.read_text(encoding="utf-8"), "the answer")
+
+
+class InvokeAgentOverrideTests(unittest.TestCase):
+    def test_role_overrides_apply_per_call_without_mutating_agent_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_path = root / "prompt.txt"
+            prompt_path.write_text("prompt\n", encoding="utf-8")
+            candidate_path = root / "candidate.md"
+            cfg = {
+                "timeout_seconds": 30,
+                "turn_budgets": {"04": 20},
+                "roles": {"04": {"primary": "codex", "model_override": "stage-model", "effort_override": "low"}},
+                "agents": {"codex": {"command": "codex", "model": "base-model", "read_args": [], "write_args": [], "workspace_write": True, "enabled": True}},
+            }
+            original_command_available = real_runner.command_available
+            original_run_to_files = real_runner.run_to_files
+
+            def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, on_launch=None, **kwargs):
+                if on_launch:
+                    on_launch()
+                Path(stdout_path).write_text("", encoding="utf-8")
+                Path(stderr_path).write_text("", encoding="utf-8")
+                candidate_path.write_text("# Stage 4 - Final implementation brief\n", encoding="utf-8")
+                return 0, False
+
+            real_runner.command_available = lambda command: True
+            real_runner.run_to_files = fake_run_to_files
+            self.addCleanup(lambda: setattr(real_runner, "command_available", original_command_available))
+            self.addCleanup(lambda: setattr(real_runner, "run_to_files", original_run_to_files))
+
+            result = real_runner.invoke_agent(root, cfg, "codex", "04", "read-only", prompt_path, candidate_path, "run-1")
+
+            self.assertEqual(result["model"], "stage-model")
+            self.assertEqual(result["command_argv"][result["command_argv"].index("--model") + 1], "stage-model")
+            self.assertEqual(cfg["agents"]["codex"]["model"], "base-model")
+            self.assertNotIn("read_effort", cfg["agents"]["codex"])
+
+            candidate_path_02 = root / "candidate-02.md"
+
+            def fake_run_to_files_02(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, on_launch=None, **kwargs):
+                if on_launch:
+                    on_launch()
+                Path(stdout_path).write_text("", encoding="utf-8")
+                Path(stderr_path).write_text("", encoding="utf-8")
+                candidate_path_02.write_text("# Stage 2 - Technical specification\n", encoding="utf-8")
+                return 0, False
+
+            real_runner.run_to_files = fake_run_to_files_02
+            cfg["roles"]["02"] = {"primary": "codex"}
+            cfg["turn_budgets"]["02"] = 20
+
+            result_02 = real_runner.invoke_agent(root, cfg, "codex", "02", "read-only", prompt_path, candidate_path_02, "run-2")
+
+            self.assertEqual(result_02.get("model"), "base-model")
+            self.assertEqual(result_02["command_argv"][result_02["command_argv"].index("--model") + 1], "base-model")
+            self.assertEqual(cfg["agents"]["codex"]["model"], "base-model")
 
 
 if __name__ == "__main__":

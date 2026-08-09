@@ -60,6 +60,23 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(summary["overall"]["count"], 3)
         self.assertEqual(summary["overall"]["output_tokens"], 5)
 
+    def test_summarize_computes_cache_hit_ratio_when_tokens_known(self):
+        entries = [
+            {"agent": "codex", "usage": {"input_tokens": 30, "cache_read_tokens": 70}},
+            {"agent": "claude", "usage": {"output_tokens": 5}},
+        ]
+        summary = usage.summarize(entries, group_by="agent")
+
+        self.assertAlmostEqual(summary["groups"]["codex"]["cache_hit_ratio"], 0.7)
+        self.assertIsNone(summary["groups"]["claude"]["cache_hit_ratio"])
+        self.assertAlmostEqual(summary["overall"]["cache_hit_ratio"], 0.7)
+
+    def test_cache_hit_ratio_unknown_for_cache_creation_only(self):
+        summary = usage.summarize([{"agent": "codex", "usage": {"cache_creation_tokens": 10}}])
+
+        self.assertTrue(summary["overall"]["tokens_known"])
+        self.assertIsNone(summary["overall"]["cache_hit_ratio"])
+
     def test_concurrent_appends_from_separate_processes_all_land(self):
         script = (
             "import sys; sys.path.insert(0, %r)\n"
