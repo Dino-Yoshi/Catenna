@@ -99,7 +99,24 @@ class FallbackHandoffTests(unittest.TestCase):
         handoff = fallback_handoff({"changed_files": []}, "reason", verification_report=report)
         self.assertEqual(
             handoff["verified"],
-            ["unit_tests: passed", "gradle_compileJava: failed", "test_coverage_delta_signal: ok"],
+            [
+                "unit_tests: passed",
+                "gradle_compileJava: failed",
+                "test_coverage_delta_signal: ok",
+            ],
+        )
+
+    def test_verification_report_includes_driven_project_reason(self):
+        report = {
+            "checks": [{"name": "unit_tests", "status": "passed"}],
+            "test_coverage_delta_signal": {"status": "ok"},
+            "driven_project_verified": False,
+            "driven_project_verification_reason": "no driven-project commands configured",
+        }
+        handoff = fallback_handoff({"changed_files": []}, "reason", verification_report=report)
+        self.assertIn(
+            "driven_project_verified: false (no driven-project commands configured)",
+            handoff["verified"],
         )
 
 

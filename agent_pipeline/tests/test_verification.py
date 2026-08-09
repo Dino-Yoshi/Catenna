@@ -543,6 +543,9 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(report["overall_status"], "passed")
         self.assertFalse(report["driven_project_verified"])
+        self.assertFalse(report["driven_project_checks_configured"])
+        self.assertEqual(report["driven_project_check_count"], 0)
+        self.assertEqual(report["driven_project_verification_reason"], "no driven-project commands configured")
         self.assertTrue(report["manifest_present"])
         self.assertTrue(report["manifest_updated"])
         self.assertEqual(report["test_coverage_delta_signal"]["status"], "flagged")
@@ -554,7 +557,10 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
         on_disk = json.loads(json_path.read_text(encoding="utf-8"))
         self.assertEqual(on_disk["overall_status"], "passed")
         self.assertFalse(on_disk["driven_project_verified"])
+        self.assertEqual(on_disk["driven_project_verification_reason"], "no driven-project commands configured")
         self.assertIn("Driven-project verified: **false**", md_path.read_text(encoding="utf-8"))
+        self.assertIn("Driven-project checks configured: **false** (0)", md_path.read_text(encoding="utf-8"))
+        self.assertIn("Driven-project verification reason: no driven-project commands configured", md_path.read_text(encoding="utf-8"))
 
         updated_manifest = json.loads((self.task_dir / "05_implementation_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(updated_manifest["verification"]["unit_tests"], "passed")
@@ -566,6 +572,7 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
         self.assertFalse(report["manifest_present"])
         self.assertFalse(report["manifest_updated"])
         self.assertFalse(report["driven_project_verified"])
+        self.assertEqual(report["driven_project_verification_reason"], "no driven-project commands configured")
         self.assertEqual(report["test_coverage_delta_signal"]["status"], "no_data")
 
     def test_configured_driven_project_commands_affect_report_status(self):
@@ -581,7 +588,26 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(report["overall_status"], "passed")
         self.assertTrue(report["driven_project_verified"])
+        self.assertTrue(report["driven_project_checks_configured"])
+        self.assertEqual(report["driven_project_check_count"], 1)
+        self.assertEqual(report["driven_project_verification_reason"], "all configured driven-project commands passed")
         self.assertIn("driven_project_acceptance", [check["name"] for check in report["checks"]])
+
+    def test_failing_driven_project_command_reports_reason(self):
+        failing = self.repo_root / "failing.py"
+        failing.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(2)\n", encoding="utf-8")
+        failing.chmod(0o755)
+
+        report = verification.run_verification(
+            self.task_dir,
+            self.repo_root,
+            driven_project_commands=[{"name": "acceptance", "argv": [str(failing)]}],
+        )
+
+        self.assertEqual(report["overall_status"], "failed")
+        self.assertFalse(report["driven_project_verified"])
+        self.assertTrue(report["driven_project_checks_configured"])
+        self.assertEqual(report["driven_project_verification_reason"], "configured driven-project command failed: driven_project_acceptance")
 
     def test_skip_self_check_omits_unit_tests_and_mock_pipeline(self):
         report = verification.run_verification(self.task_dir, self.repo_root, skip_self_check=True)

@@ -535,6 +535,8 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS)
             self.assertIn("unit: passed (exit=0, 0.0s)", output)
+            self.assertIn("driven_project_checks_configured: false (0)", output)
+            self.assertIn("driven_project_verified: false (unknown)", output)
 
     def test_pipeline_verify_loads_config_and_passes_driven_project_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -552,6 +554,10 @@ class ControllerReliabilityTests(unittest.TestCase):
                 return {
                     "overall_status": "passed",
                     "checks": [],
+                    "driven_project_checks_configured": True,
+                    "driven_project_check_count": 1,
+                    "driven_project_verified": True,
+                    "driven_project_verification_reason": "all configured driven-project commands passed",
                     "test_coverage_delta_signal": {"status": "not_checked"},
                     "report_paths": {"md_path": str(root / "report.md")},
                 }
@@ -564,6 +570,7 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS, output)
             self.assertIs(seen["driven_project_commands"], driven_commands)
+            self.assertIn("driven_project_verified: true (all configured driven-project commands passed)", output)
 
     def test_pipeline_verify_passes_verification_toggles(self):
         with tempfile.TemporaryDirectory() as tmp:

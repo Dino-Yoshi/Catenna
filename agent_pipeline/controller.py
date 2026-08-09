@@ -318,6 +318,14 @@ def pipeline_verify(task, run_build=False):
 
     print("task: %s" % task)
     print("overall_status: %s" % pass_fail_color(report["overall_status"]))
+    print("driven_project_checks_configured: %s (%d)" % (
+        str(bool(report.get("driven_project_checks_configured"))).lower(),
+        int(report.get("driven_project_check_count") or 0),
+    ))
+    print("driven_project_verified: %s (%s)" % (
+        str(bool(report.get("driven_project_verified"))).lower(),
+        report.get("driven_project_verification_reason", "unknown"),
+    ))
     for check in report["checks"]:
         if "exit_code" in check:
             duration_seconds = check.get("duration_seconds")

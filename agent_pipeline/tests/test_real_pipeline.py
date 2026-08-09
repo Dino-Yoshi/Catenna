@@ -662,6 +662,25 @@ class RealPipelineTests(unittest.TestCase):
         handoff = json.loads((self.task_dir / "05_supervisor_handoff.json").read_text(encoding="utf-8"))
         self.assertEqual(handoff["route"], "auto_verified")
 
+    def test_enable_auto_verified_false_keeps_manual_stage6_checkpoint(self):
+        config = self.config()
+        config["enable_auto_verified"] = False
+        controller.load_config = lambda: config
+        controller.verification.run_verification = lambda *a, **k: self.verification_report(
+            overall_status="passed",
+            coverage_status="ok",
+            driven_project_verified=True,
+        )
+
+        code = controller.pipeline_run(self.task, allow_dirty=True)
+
+        self.assertEqual(code, EXIT_BLOCKED)
+        state = load_state(self.task_dir, self.task)
+        self.assertEqual(state["state"], "awaiting_human_test")
+        self.assertFalse((self.task_dir / CONTRACTS["06"].filename).exists())
+        handoff = json.loads((self.task_dir / "05_supervisor_handoff.json").read_text(encoding="utf-8"))
+        self.assertEqual(handoff["route"], "manual_test")
+
     def test_manual_stage6_completion_drives_stage_07_08_on_resume(self):
         code = controller.pipeline_run(self.task, allow_dirty=True)
         self.assertEqual(code, EXIT_BLOCKED)
