@@ -575,7 +575,7 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertIn("catenna status bg-run", output)
             self.assertIn("catenna report bg-run", output)
 
-    def test_pipeline_verify_background_preserves_build_and_prints_report_not_tail(self):
+    def test_pipeline_verify_background_preserves_build_and_prints_tail_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.with_tasks_root(root)
@@ -591,7 +591,8 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(calls, [("bg-verify", ["verify", "bg-verify", "--build"], "background_verify.log")])
             self.assertNotIn("--background", calls[0][1])
             self.assertIn(str(root / "bg-verify" / "05_verification_report.md"), output)
-            self.assertIn("catenna tail does not cover verify output", output)
+            self.assertIn("catenna tail bg-verify", output)
+            self.assertIn(str(root / "bg-verify" / ".orchestrator" / "background_verify.log"), output)
 
     def test_status_prints_active_cross_task_cooldowns(self):
         with tempfile.TemporaryDirectory() as tmp:
