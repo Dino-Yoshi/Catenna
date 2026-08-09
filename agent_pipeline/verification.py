@@ -16,6 +16,7 @@ from __future__ import print_function
 import json
 import os
 import re
+import socket
 import sys
 import time
 from pathlib import Path
@@ -64,6 +65,8 @@ def _write_running_check_sidecar(stdout_path, name, argv, started_at):
             "name": name,
             "status": "running",
             "command": list(argv),
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
             "started_at": started_at,
             "stdout_path": str(stdout_path),
             "stderr_path": str(Path(stdout_path).with_suffix(".stderr")),
