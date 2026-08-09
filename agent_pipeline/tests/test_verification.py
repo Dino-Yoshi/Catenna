@@ -313,6 +313,27 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
         self.assertTrue(sidecar.exists())
         self.assertEqual(json.loads(sidecar.read_text(encoding="utf-8")), result)
 
+    def test_gradle_writes_running_sidecar_before_subprocess(self):
+        self.write_fake_gradlew("import sys\nsys.exit(0)\n")
+        original = verification.run_to_files
+        observed = {}
+
+        def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=None, env=None):
+            sidecar = Path(stdout_path).with_suffix(".json")
+            observed.update(json.loads(sidecar.read_text(encoding="utf-8")))
+            Path(stdout_path).write_text("", encoding="utf-8")
+            Path(stderr_path).write_text("", encoding="utf-8")
+            return 0, False
+
+        verification.run_to_files = fake_run_to_files
+        self.addCleanup(lambda: setattr(verification, "run_to_files", original))
+
+        result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+
+        self.assertEqual(observed["status"], "running")
+        self.assertEqual(observed["name"], "gradle_compileJava")
+        self.assertEqual(json.loads(Path(result["stdout_path"]).with_suffix(".json").read_text(encoding="utf-8")), result)
+
     def test_missing_gradlew_is_not_attempted(self):
         result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
         self.assertEqual(result["status"], "not_attempted")
