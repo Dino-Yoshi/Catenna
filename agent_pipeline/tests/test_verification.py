@@ -332,6 +332,8 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
 
         self.assertEqual(observed["status"], "running")
         self.assertEqual(observed["name"], "gradle_compileJava")
+        self.assertIsInstance(observed["pid"], int)
+        self.assertTrue(observed["host"])
         self.assertEqual(json.loads(Path(result["stdout_path"]).with_suffix(".json").read_text(encoding="utf-8")), result)
 
     def test_missing_gradlew_is_not_attempted(self):
