@@ -438,6 +438,47 @@ is safe by construction (see "State machine" above).
 
 ## Changelog
 
+- **Usage/cost-control pass** (2026-08-09, branch `v3`): five features
+  targeting repetitive/redundant agent invocations and per-stage model/
+  effort control, restructured from a code-only investigation in
+  `v3-notes.md` — see `.agent-pipeline/tasks/v3-implementation/`
+  (gitignored) for the full spec and pipeline run. (1) `config["roles"][stage_key]`
+  gained optional `model_override`/`effort_override` fields, merged into a
+  fresh `dict` in `real_runner.invoke_agent` (never mutating the shared
+  `config["agents"][agent]` base dict, since several stages can share one
+  agent within a single `catenna run`); codex's `build_argv` branch also
+  gained `--model` wiring, fixing a pre-existing dead `agents.codex.model`
+  config field as a side effect (codex is the primary agent for the five
+  most-invoked stages, so this wasn't a small gap). (2) Stage 04
+  gate-rejection retries now inline the rejected `04_gate.md` content
+  directly into the pass-2+ prompt (`controller.stage4_rejected_gate_context`,
+  read from persisted `state["stage_gate_passes"]` rather than a
+  loop-local variable, so it stays correct across a resumed run), via a
+  new `invoke_stage(..., extra_context=...)` parameter generalizing the
+  existing `completion_for` append mechanism. (3) `config["verification"]`
+  gained `skip_self_check`/`build_implies_compile` booleans (both default
+  `False`, today's behavior unchanged unless opted in) to skip Catenna's
+  own self-test checks and/or the standalone `gradle compileJava` check
+  when `--build` already implies it. (4) Stages `03`/`04`/`04_gate` gained
+  the same repository-read budget language stage `02` already had. (5)
+  `usage.summarize()` buckets gained a computed `cache_hit_ratio` field
+  (`cache_read_tokens / (input_tokens + cache_read_tokens)`, `None` when
+  not meaningful — same `tokens_known`-gated convention as every other
+  derived field in that module), printed as `cache_hit=NN.N%` in
+  `pipeline_usage`'s existing output lines. Deliberately out of scope:
+  overseer-driven dynamic model/effort selection — `v3-notes.md`
+  concluded that needs this pass's plumbing plus real ledger data to
+  exist first, so it's tentative v4 work, not built here. 374 → 391
+  tests, all green throughout (two pre-existing, unrelated failures in
+  `test_controller_reliability.py`/`test_current_task.py` predate this
+  branch and were confirmed via `git stash` against unmodified `main`
+  before Stage 6 accepted them as known-unrelated). All five features
+  manually verified against real invocations, not just the test suite —
+  Feature 1's override confirmed in a real `runs/<base>.json` metadata
+  sidecar's `command_argv`, Feature 2's inlined rejection text confirmed
+  in a real on-disk pass-2 prompt file, Feature 5's `cache_hit_ratio`
+  cross-checked by hand against this repo's own real
+  `.agent-pipeline/usage/ledger.jsonl`.
 - **CLI polish pass** (2026-08-08, branch `v1-simplification`): added bash
   tab-completion (`catenna completion bash`, hand-rolled, zero new
   dependencies — introspects `build_parser()` for command names/aliases/
