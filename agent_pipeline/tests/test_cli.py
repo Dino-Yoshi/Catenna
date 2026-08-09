@@ -74,6 +74,28 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.task, "some-task")
         self.assertTrue(args.background)
 
+    def test_tail_verbose_parses_without_short_v(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["tail", "some-task", "--verbose"])
+
+        self.assertEqual(args.task, "some-task")
+        self.assertTrue(args.verbose)
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["tail", "some-task", "-v"])
+
+    def test_brief_verbose_parses_without_short_v(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["brief", "some-task", "--verbose"])
+
+        self.assertEqual(args.task, "some-task")
+        self.assertTrue(args.verbose)
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["brief", "some-task", "-v"])
+
     def test_background_is_only_on_run_and_verify(self):
         parser = cli.build_parser()
         err = io.StringIO()
