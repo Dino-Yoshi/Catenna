@@ -3,3 +3,4 @@ __pycache__/
 .agent-pipeline/
 .venv/
 agent_pipeline.egg-info/
+v2-notes.md
