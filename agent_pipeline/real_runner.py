@@ -60,7 +60,13 @@ def invoke_agent(
     metadata_path = runs_dir / (base + ".json")
     candidate_path.parent.mkdir(parents=True, exist_ok=True)
 
-    detail = agent_config(config, agent)
+    detail = dict(agent_config(config, agent))
+    role = config.get("roles", {}).get(stage_key, {})
+    if role.get("model_override"):
+        detail["model"] = role.get("model_override")
+    if role.get("effort_override"):
+        detail["read_effort"] = role.get("effort_override")
+        detail["write_effort"] = role.get("effort_override")
     started = now()
     started_monotonic = time.time()
     argv = None
@@ -227,6 +233,8 @@ def build_argv(agent, detail, execution_mode, prompt_path, candidate_path, confi
         sandbox = "workspace-write" if execution_mode == "workspace-write" else "read-only"
         extra = detail.get("write_args" if execution_mode == "workspace-write" else "read_args", [])
         argv = [command, "exec", "--ephemeral", "--json", "--sandbox", sandbox] + list(extra)
+        if detail.get("model"):
+            argv += ["--model", str(detail["model"])]
         argv += ["--output-last-message", str(candidate_path), "-"]
         return argv, list(argv)
     if agent == "claude":
