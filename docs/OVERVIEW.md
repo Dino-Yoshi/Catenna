@@ -12,7 +12,8 @@ commands, both forms fully supported (see "Command table" below).
 This snapshot reflects the system through Phase 5 of the original redesign
 (history below) plus the post-extraction hardening pass that has followed
 on branch `v1-fixes`/`v1-cleanup`/`v1-simplification` (see "Post-Phase-5
-hardening" below and the Changelog at the bottom). 339 tests, all green:
+hardening" below and the Changelog at the bottom). The full unittest suite
+is expected to stay green:
 `python3 -m unittest discover -s agent_pipeline/tests`.
 
 Non-editable installs include Catenna's runtime mock fixtures as package
@@ -369,7 +370,9 @@ that would violate an `independent_from` constraint.
   Phase 4's cross-task cooldown windows are always
   `default_cooldown_seconds`-based in practice, never a genuine CLI-reported
   reset time, and `rate_limit` without a credible reset still hard-blocks a
-  task outright. See [phase-4-handoff.md](handoffs/phase-4-handoff.md).
+  task outright. Current committed task artifacts and run metadata still do
+  not include a confirmed provider reset-time schema; add parsing only when a
+  real fixture exists. See [phase-4-handoff.md](handoffs/phase-4-handoff.md).
 - `usage_summary`'s agy extraction (`stream_events.py`) is unconfirmed
   against a real Antigravity CLI fixture — it will silently return `None`
   for agy unless agy's real `result` event happens to match the speculative
@@ -390,7 +393,9 @@ that would violate an `independent_from` constraint.
 - `pipeline-tail`'s live view still only shows "thinking..." as a status
   line for claude, not the actual reasoning text streaming in — Phase 5
   scoped reasoning visibility to post-hoc (`pipeline-report`/
-  `pipeline-brief`'s excerpt), not live-tail.
+  `pipeline-brief`'s excerpt), not live-tail. Do not stream hidden or
+  provider-private reasoning text live unless the provider schema and product
+  policy make that explicitly appropriate.
 
 ## Command table
 
