@@ -305,6 +305,8 @@ def pipeline_verify(task, run_build=False):
             REPO_ROOT,
             run_build=run_build,
             driven_project_commands=config.get("verification", {}).get("driven_project_commands", []),
+            skip_self_check=config.get("verification", {}).get("skip_self_check", False),
+            build_implies_compile=config.get("verification", {}).get("build_implies_compile", False),
         )
     except verification.VerificationError as exc:
         print(str(exc))
@@ -394,9 +396,9 @@ def pipeline_usage(task=None, agent=None, since_hours=None):
         bucket = summary["groups"][name]
         tokens = "in=%d out=%d" % (bucket["input_tokens"], bucket["output_tokens"]) if bucket["tokens_known"] else "tokens=unknown"
         cost = ("$%.4f" % bucket["total_cost_usd"]) if bucket["cost_known"] else "cost=unknown"
-        print("  %s: calls=%d failures=%d duration=%.1fs %s %s" % (name, bucket["count"], bucket["failures"], bucket["duration_seconds"], tokens, cost))
+        print("  %s: calls=%d failures=%d duration=%.1fs %s %s %s" % (name, bucket["count"], bucket["failures"], bucket["duration_seconds"], tokens, cost, format_cache_hit(bucket)))
     overall = summary["overall"]
-    print("overall: calls=%d failures=%d duration=%.1fs" % (overall["count"], overall["failures"], overall["duration_seconds"]))
+    print("overall: calls=%d failures=%d duration=%.1fs %s" % (overall["count"], overall["failures"], overall["duration_seconds"], format_cache_hit(overall)))
     try:
         cooldowns = usage.load_cooldowns(cooldown_store_path())
         if cooldowns:
@@ -404,6 +406,13 @@ def pipeline_usage(task=None, agent=None, since_hours=None):
     except Exception:
         pass
     return EXIT_SUCCESS
+
+
+def format_cache_hit(bucket):
+    ratio = bucket.get("cache_hit_ratio")
+    if ratio is None:
+        return "cache_hit=unknown"
+    return "cache_hit=%.1f%%" % (float(ratio) * 100.0)
 
 
 def pipeline_report(task):
@@ -597,6 +606,8 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
                 REPO_ROOT,
                 allow_pid=os.getpid(),
                 driven_project_commands=config.get("verification", {}).get("driven_project_commands", []),
+                skip_self_check=config.get("verification", {}).get("skip_self_check", False),
+                build_implies_compile=config.get("verification", {}).get("build_implies_compile", False),
             )
         except verification.VerificationError as exc:
             append_log(task_dir, {"event": "verification_error", "stage": "05", "reason": str(exc), "run_id": state.get("run_id")})
@@ -647,7 +658,17 @@ def run_stage4_gate_loop(task_dir, state, config, assignments):
     force_audit = pass_number > 1 or "04_gate" not in state.get("completed_stages", [])
     previous_rejection = None
     while pass_number <= max_passes:
-        code = ensure_real_stage(task_dir, state, config, "04", "read-only", assignments, pass_number=pass_number, force=force_brief)
+        code = ensure_real_stage(
+            task_dir,
+            state,
+            config,
+            "04",
+            "read-only",
+            assignments,
+            pass_number=pass_number,
+            force=force_brief,
+            extra_context=stage4_rejected_gate_context(task_dir, state, pass_number),
+        )
         if code != EXIT_SUCCESS:
             return code
         reconcile_artifacts(task_dir, state, read_only=False)
@@ -696,7 +717,30 @@ def run_stage4_gate_loop(task_dir, state, config, assignments):
     return EXIT_BLOCKED
 
 
-def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assignments, pass_number=1, force=False):
+def stage4_rejected_gate_context(task_dir, state, pass_number):
+    if pass_number <= 1:
+        return None
+    passes = state.get("stage_gate_passes") or []
+    if not passes:
+        return None
+    latest = passes[-1]
+    if latest.get("accepted") is not False:
+        return None
+    gate_path = task_dir / CONTRACTS["04_gate"].filename
+    try:
+        gate_text = gate_path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return "\n".join([
+        "Latest Stage 04 gate rejection feedback:",
+        "",
+        gate_text.rstrip(),
+        "",
+        "Revise Stage 04 using the feedback above.",
+    ]).rstrip() + "\n"
+
+
+def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
     pending = state.get("pending_approval") or {}
     awaiting_retry_approval = state.get("state") == "awaiting_retry_approval"
     completed = stage_key in state.get("completed_stages", [])
@@ -745,7 +789,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
         attempt_number = increment_attempt(state, stage_key)
         increment_agent_count(state, agent)
         append_log(task_dir, {"event": "stage_dispatch", "stage": stage_key, "pass": pass_number, "attempt": attempt_number, "provider": agent, "attempt_kind": next_attempt_kind, "retry_reason": next_retry_reason, "run_id": state.get("run_id")})
-        result = invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, attempt_number=attempt_number, attempt_kind=next_attempt_kind, retry_reason=next_retry_reason)
+        result = invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, attempt_number=attempt_number, attempt_kind=next_attempt_kind, retry_reason=next_retry_reason, extra_context=extra_context)
         state.setdefault("real_stage_runs", {}).setdefault(stage_key, []).append(result)
         state.setdefault("execution_modes", {})[stage_key] = execution_mode
         source_after = None
@@ -790,7 +834,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             completion_attempt = increment_attempt(state, stage_key)
             increment_agent_count(state, agent)
             append_log(task_dir, {"event": "retry_scheduled", "stage": stage_key, "pass": pass_number, "attempt": completion_attempt, "provider": agent, "classification": FAILURE_CLASS_MAX_TURNS, "retry_reason": "max-turn completion retry", "run_id": state.get("run_id")})
-            completion = invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=output, attempt_number=completion_attempt, attempt_kind="completion_only_retry", retry_reason="max-turn completion retry")
+            completion = invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=output, attempt_number=completion_attempt, attempt_kind="completion_only_retry", retry_reason="max-turn completion retry", extra_context=extra_context)
             state.setdefault("real_stage_runs", {}).setdefault(stage_key, []).append(completion)
             completion_raw_output = read_candidate(completion)
             completion_output = normalize_stage_output(stage_key, completion_raw_output)
@@ -847,8 +891,13 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
     return EXIT_BLOCKED
 
 
-def invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=None, attempt_number=1, attempt_kind="normal", retry_reason="initial/no-retry"):
+def invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=None, attempt_number=1, attempt_kind="normal", retry_reason="initial/no-retry", extra_context=None):
     prompt_path = render_prompt(task_dir, state["task"], stage_key, pass_number)
+    if extra_context is not None:
+        with open(str(prompt_path), "a", encoding="utf-8") as handle:
+            handle.write("\n")
+            handle.write(str(extra_context).rstrip())
+            handle.write("\n")
     if completion_for is not None:
         with open(str(prompt_path), "a", encoding="utf-8") as handle:
             handle.write("\nComplete the preserved partial artifact below. Return only the complete required artifact.\n\n")
