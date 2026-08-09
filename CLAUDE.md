@@ -23,9 +23,8 @@ Two equivalent forms, same code:
   progress with `catenna tail <task>` and `catenna status <task>`.
 - `catenna verify <task> --background` — starts verification in a detached
   child and returns after launch. The parent exit code only means the child
-  process was started. Check the verification report and
-  `.orchestrator/background_verify.log`; `catenna tail` does not cover
-  verify output.
+  process was started. Check the verification report, `.orchestrator/background_verify.log`,
+  or follow verification stdout with unfiltered `catenna tail <task>`.
 
 **Editable install only.** `pyproject.toml`'s setuptools config only lists
 `packages = ["agent_pipeline"]` — minimal on purpose. `pip install -e .` is
