@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -61,7 +62,7 @@ TASKS_ROOT = REPO_ROOT / ".agent-pipeline" / "tasks"
 # anything about the project being driven, so they live with the package
 # (independent of which project's directory is REPO_ROOT/cwd) rather than
 # under the driven project's .agent-pipeline/.
-PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_ROOT = Path(__file__).resolve().parent
 FIXTURES_ROOT = PACKAGE_ROOT / "fixtures"
 SCENARIO_PATH = FIXTURES_ROOT / "mock_scenarios.json"
 USAGE_ROOT = REPO_ROOT / ".agent-pipeline" / "usage"
@@ -1666,8 +1667,7 @@ def now():
 
 def mock_test():
     scenarios = load_scenarios()
-    run_root = FIXTURES_ROOT / "_mock_runs"
-    run_root.mkdir(parents=True, exist_ok=True)
+    run_root = Path(tempfile.mkdtemp(prefix="catenna-mock-runs-"))
     suite_root = run_root / ("suite-" + uuid.uuid4().hex[:12])
     suite_root.mkdir()
     original_tasks_root = TASKS_ROOT
@@ -1711,7 +1711,7 @@ def mock_test():
             failed.append("resume_reconciliation: " + resume_result)
     finally:
         globals()["TASKS_ROOT"] = original_tasks_root
-        shutil.rmtree(str(suite_root), ignore_errors=True)
+        shutil.rmtree(str(run_root), ignore_errors=True)
     if failed:
         print("mock tests failed:")
         for item in failed:
