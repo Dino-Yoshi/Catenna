@@ -186,6 +186,25 @@ class SummarizeEventTests(unittest.TestCase):
         self.assertIsNone(stream_events.summarize_event("codex", "not a dict"))
         self.assertIsNone(stream_events.summarize_event("codex", None))
 
+    def test_non_verbose_truncates_message_summary(self):
+        obj = {"type": "item.completed", "item": {"type": "agent_message", "text": "x" * 130}}
+        summary = stream_events.summarize_event("codex", obj)
+        self.assertTrue(summary.endswith("..."))
+        self.assertLess(len(summary), 150)
+
+    def test_verbose_keeps_full_normalized_message_summary(self):
+        text = ("x" * 130) + "\nsecond line"
+        obj = {"type": "item.completed", "item": {"type": "agent_message", "text": text}}
+        summary = stream_events.summarize_event("codex", obj, verbose=True)
+        self.assertIn(("x" * 130) + " second line", summary)
+        self.assertNotIn("\n", summary)
+        self.assertFalse(summary.endswith("..."))
+
+    def test_unknown_event_short_verbose_keeps_full_json(self):
+        obj = {"payload": "x" * 150}
+        summary = stream_events.summarize_event(None, obj, verbose=True)
+        self.assertIn("x" * 150, summary)
+
 
 class UsageSummaryTests(unittest.TestCase):
     def test_codex_usage_extracted(self):
