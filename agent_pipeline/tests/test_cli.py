@@ -65,10 +65,28 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.task, "some-task")
         self.assertTrue(args.background)
 
+    def test_run_bg_alias_parses_to_background(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["run", "some-task", "--bg"])
+
+        self.assertEqual(args.command, "run")
+        self.assertEqual(args.task, "some-task")
+        self.assertTrue(args.background)
+
     def test_verify_background_parses(self):
         parser = cli.build_parser()
 
         args = parser.parse_args(["verify", "some-task", "--background"])
+
+        self.assertEqual(args.command, "verify")
+        self.assertEqual(args.task, "some-task")
+        self.assertTrue(args.background)
+
+    def test_verify_bg_alias_parses_to_background(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["verify", "some-task", "--bg"])
 
         self.assertEqual(args.command, "verify")
         self.assertEqual(args.task, "some-task")
@@ -220,6 +238,15 @@ class CliCompletionCommandTests(unittest.TestCase):
 
         for name in sub.choices:
             self.assertIn(name, script)
+
+    def test_completion_bash_includes_bg_alias_for_run_and_verify(self):
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+
+        script = cli.build_completion_bash(sub)
+
+        self.assertIn("--bg", script)
+        self.assertIn("--background", script)
 
 
 if __name__ == "__main__":
