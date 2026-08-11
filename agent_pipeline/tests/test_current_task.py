@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -11,6 +12,14 @@ from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_SUCCESS
 
 
 class CurrentTaskTests(unittest.TestCase):
+    def setUp(self):
+        # Keep captured-stdout assertions independent from the caller's shell,
+        # regardless of how the test runner imports this module.
+        for key in ("FORCE_COLOR", "NO_COLOR"):
+            original = os.environ.pop(key, None)
+            if original is not None:
+                self.addCleanup(os.environ.__setitem__, key, original)
+
     def with_repo_root(self, root):
         original = controller.REPO_ROOT
         controller.REPO_ROOT = root
