@@ -16,6 +16,7 @@ from __future__ import print_function
 import json
 import os
 import re
+import socket
 import sys
 import time
 from pathlib import Path
@@ -64,6 +65,8 @@ def _write_running_check_sidecar(stdout_path, name, argv, started_at):
             "name": name,
             "status": "running",
             "command": list(argv),
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
             "started_at": started_at,
             "stdout_path": str(stdout_path),
             "stderr_path": str(Path(stdout_path).with_suffix(".stderr")),
@@ -320,6 +323,7 @@ def run_verification(
     driven_project_checks = run_driven_project_checks(repo_root, runs_dir, driven_project_commands)
     checks.extend(driven_project_checks)
     driven_project_verified = bool(driven_project_checks) and all(check["status"] == "passed" for check in driven_project_checks)
+    driven_project_status = driven_project_verification_status(driven_project_commands, driven_project_checks)
 
     manifest = load_manifest_if_present(task_dir)
     coverage_signal = test_coverage_delta_signal(manifest)
@@ -332,7 +336,10 @@ def run_verification(
         "task": task_dir.name,
         "manifest_present": manifest is not None,
         "checks": checks,
+        "driven_project_checks_configured": driven_project_status["configured"],
+        "driven_project_check_count": driven_project_status["configured_count"],
         "driven_project_verified": driven_project_verified,
+        "driven_project_verification_reason": driven_project_status["reason"],
         "test_coverage_delta_signal": coverage_signal,
         "overall_status": overall_status(checks),
     }
@@ -340,6 +347,35 @@ def run_verification(
     report["report_paths"] = paths
     report["manifest_updated"] = updated_manifest is not None
     return report
+
+
+def driven_project_verification_status(driven_project_commands, driven_project_checks):
+    configured_count = len(driven_project_commands or [])
+    if configured_count == 0:
+        return {
+            "configured": False,
+            "configured_count": 0,
+            "reason": "no driven-project commands configured",
+        }
+    failed = [check.get("name") for check in driven_project_checks if check.get("status") == "failed"]
+    if failed:
+        return {
+            "configured": True,
+            "configured_count": configured_count,
+            "reason": "configured driven-project command failed: " + ", ".join(failed),
+        }
+    incomplete = [check.get("name") for check in driven_project_checks if check.get("status") != "passed"]
+    if incomplete:
+        return {
+            "configured": True,
+            "configured_count": configured_count,
+            "reason": "configured driven-project command did not pass: " + ", ".join(incomplete),
+        }
+    return {
+        "configured": True,
+        "configured_count": configured_count,
+        "reason": "all configured driven-project commands passed",
+    }
 
 
 def overall_status(checks):
@@ -367,6 +403,11 @@ def render_markdown(report):
         "Generated: " + report.get("generated_at", ""),
         "Overall status: **%s**" % report.get("overall_status"),
         "Driven-project verified: **%s**" % str(bool(report.get("driven_project_verified"))).lower(),
+        "Driven-project checks configured: **%s** (%d)" % (
+            str(bool(report.get("driven_project_checks_configured"))).lower(),
+            int(report.get("driven_project_check_count") or 0),
+        ),
+        "Driven-project verification reason: %s" % report.get("driven_project_verification_reason", "unknown"),
         "",
         "## Checks",
         "",

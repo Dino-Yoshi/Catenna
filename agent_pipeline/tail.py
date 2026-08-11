@@ -10,11 +10,13 @@ are safe to run concurrently with an in-progress `pipeline-run`.
 from __future__ import print_function
 
 import json
+import socket
 import time
 from pathlib import Path
 
 from . import stream_events
 from . import state
+from .locking import pid_live
 from .state import CorruptState, orchestrator_dir
 
 
@@ -103,12 +105,28 @@ def _sidecar_status(stdout_path):
         return "malformed", None, "metadata sidecar malformed: %s (expected JSON object)" % metadata_path.name
     status_value = metadata.get("status")
     if status_value == "running":
+        stale_message = _stale_running_sidecar_message(metadata_path, metadata)
+        if stale_message:
+            return "orphaned", None, stale_message
         return "running", metadata, None
     if status_value:
         return "complete", metadata, None
     if _looks_like_legacy_complete(metadata):
         return "complete", metadata, None
     return "malformed", None, "metadata sidecar incomplete: %s (missing status and final metadata)" % metadata_path.name
+
+
+def _stale_running_sidecar_message(metadata_path, metadata):
+    pid = metadata.get("pid")
+    if pid is None:
+        return None
+    host = metadata.get("host")
+    if host and host != socket.gethostname():
+        return None
+    live = pid_live(pid)
+    if live is False:
+        return "metadata sidecar stale: %s (writer pid %s is not live)" % (metadata_path.name, pid)
+    return None
 
 
 def _looks_like_legacy_complete(metadata):
@@ -123,6 +141,9 @@ def _print_sidecar_problem(stdout_path, print_fn):
     if status_name == "missing":
         print_fn("run artifact orphaned/corrupt: %s" % message)
         return "orphaned"
+    if status_name == "orphaned":
+        print_fn("run artifact orphaned/corrupt: %s" % message)
+        return "orphaned"
     if status_name == "malformed":
         print_fn("run artifact corrupt: %s" % message)
         return "corrupt_metadata"
@@ -131,7 +152,7 @@ def _print_sidecar_problem(stdout_path, print_fn):
 
 def _sidecar_complete(stdout_path):
     status_name, _metadata, _message = _sidecar_status(stdout_path)
-    if status_name in ("missing", "malformed"):
+    if status_name in ("missing", "malformed", "orphaned"):
         return None
     return status_name == "complete"
 

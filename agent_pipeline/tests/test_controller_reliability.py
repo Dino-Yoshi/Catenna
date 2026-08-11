@@ -148,7 +148,7 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertIn("04_final_brief_audit.md: stage=04_gate status=valid reason=valid", output)
 
     def test_mock_test_passes_against_committed_fixtures(self):
-        # Guards against .agent-pipeline/fixtures/mock_scenarios.json drifting
+        # Guards against agent_pipeline/fixtures/mock_scenarios.json drifting
         # out of sync with policies.py/controller.py again -- this fixture
         # drift previously went unnoticed by `unittest discover` entirely
         # because nothing here called controller.mock_test() directly (see
@@ -446,7 +446,10 @@ class ControllerReliabilityTests(unittest.TestCase):
                 }
 
             controller.invoke_agent = fake_invoke_agent
+            original_source_snapshot = controller.source_snapshot
             self.addCleanup(lambda: setattr(controller, "invoke_agent", original))
+            self.addCleanup(lambda: setattr(controller, "source_snapshot", original_source_snapshot))
+            controller.source_snapshot = lambda: ""
 
             controller.invoke_stage(
                 task_dir,
@@ -532,6 +535,8 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS)
             self.assertIn("unit: passed (exit=0, 0.0s)", output)
+            self.assertIn("driven_project_checks_configured: false (0)", output)
+            self.assertIn("driven_project_verified: false (unknown)", output)
 
     def test_pipeline_verify_loads_config_and_passes_driven_project_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -549,6 +554,10 @@ class ControllerReliabilityTests(unittest.TestCase):
                 return {
                     "overall_status": "passed",
                     "checks": [],
+                    "driven_project_checks_configured": True,
+                    "driven_project_check_count": 1,
+                    "driven_project_verified": True,
+                    "driven_project_verification_reason": "all configured driven-project commands passed",
                     "test_coverage_delta_signal": {"status": "not_checked"},
                     "report_paths": {"md_path": str(root / "report.md")},
                 }
@@ -561,6 +570,7 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS, output)
             self.assertIs(seen["driven_project_commands"], driven_commands)
+            self.assertIn("driven_project_verified: true (all configured driven-project commands passed)", output)
 
     def test_pipeline_verify_passes_verification_toggles(self):
         with tempfile.TemporaryDirectory() as tmp:

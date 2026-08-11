@@ -43,6 +43,10 @@ def verification_summary_bullets(verification_report):
     signal = verification_report.get("test_coverage_delta_signal") or {}
     if signal.get("status"):
         result.append("test_coverage_delta_signal: %s" % signal["status"])
+    if "driven_project_verified" in verification_report and not verification_report.get("driven_project_verified"):
+        result.append("driven_project_verified: false (%s)" % verification_report.get("driven_project_verification_reason", "unknown"))
+    elif "driven_project_verified" in verification_report:
+        result.append("driven_project_verified: true (%s)" % verification_report.get("driven_project_verification_reason", "passed"))
     return result or ["No automatic verification was marked passed by the controller."]
 
 

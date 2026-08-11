@@ -2,6 +2,9 @@ from __future__ import print_function
 
 import json
 import os
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -44,11 +47,20 @@ class TailTests(unittest.TestCase):
             )
         return stdout_path
 
-    def write_running_sidecar(self, stdout_path):
+    def write_running_sidecar(self, stdout_path, pid=None):
+        payload = {"status": "running", "stdout_path": str(stdout_path)}
+        if pid is not None:
+            payload["pid"] = pid
+            payload["host"] = socket.gethostname()
         stdout_path.with_suffix(".json").write_text(
-            json.dumps({"status": "running", "stdout_path": str(stdout_path)}),
+            json.dumps(payload),
             encoding="utf-8",
         )
+
+    def dead_pid(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
 
     def write_verification_run(self, base, text, with_metadata=True, mtime_offset=0):
         self.verification_runs_dir.mkdir(parents=True)
@@ -79,6 +91,16 @@ class TailTests(unittest.TestCase):
 
     def test_locate_does_not_treat_missing_sidecar_as_in_progress(self):
         orphan = self.write_run("05-pass-1-attempt-1-codex-orphan", CLAUDE_LINES, with_metadata=False, mtime_offset=-10)
+        completed = self.write_run("04-pass-1-attempt-1-claude-complete", CLAUDE_LINES, with_metadata=True)
+
+        found = tail.locate(self.task_dir)
+
+        self.assertEqual(found, completed)
+        self.assertNotEqual(found, orphan)
+
+    def test_locate_does_not_treat_dead_pid_sidecar_as_in_progress(self):
+        orphan = self.write_run("05-pass-1-attempt-1-codex-orphan", CLAUDE_LINES, with_metadata=False, mtime_offset=-10)
+        self.write_running_sidecar(orphan, pid=self.dead_pid())
         completed = self.write_run("04-pass-1-attempt-1-claude-complete", CLAUDE_LINES, with_metadata=True)
 
         found = tail.locate(self.task_dir)
@@ -383,6 +405,22 @@ class TailTests(unittest.TestCase):
         self.assertEqual(result, "corrupt_metadata")
         self.assertIn("metadata sidecar malformed", "\n".join(lines))
 
+    def test_follow_reports_dead_pid_running_sidecar_as_orphaned(self):
+        state_obj = new_state(self.task_dir.name)
+        state_obj["state"] = "blocked"
+        write_state_atomic(self.task_dir, state_obj)
+        stdout_path = self.runs_dir.joinpath("05-pass-1-attempt-1-codex-stale.stdout")
+        stdout_path.write_text(CLAUDE_LINES[0] + "\n", encoding="utf-8")
+        self.write_running_sidecar(stdout_path, pid=self.dead_pid())
+        lines = []
+
+        result = tail.follow(self.task_dir, stage="05", poll_interval=0.01, print_fn=lines.append)
+
+        self.assertEqual(result, "orphaned")
+        joined = "\n".join(lines)
+        self.assertIn("metadata sidecar stale", joined)
+        self.assertIn("writer pid", joined)
+
     def test_brief_reports_missing_sidecar_as_orphaned_corrupt(self):
         self.write_run("04-pass-1-attempt-1-claude-orphan", CLAUDE_LINES, with_metadata=False)
         lines = []
@@ -397,6 +435,14 @@ class TailTests(unittest.TestCase):
         result = tail.brief(self.task_dir, print_fn=lines.append)
         self.assertEqual(result, "ok")
         self.assertIn("status: in progress", "\n".join(lines))
+
+    def test_brief_reports_dead_pid_running_sidecar_as_orphaned_corrupt(self):
+        stdout_path = self.write_run("04-pass-1-attempt-1-claude-stale", CLAUDE_LINES, with_metadata=False)
+        self.write_running_sidecar(stdout_path, pid=self.dead_pid())
+        lines = []
+        result = tail.brief(self.task_dir, print_fn=lines.append)
+        self.assertEqual(result, "ok")
+        self.assertIn("status: orphaned/corrupt (metadata sidecar stale", "\n".join(lines))
 
     def test_follow_handles_no_runs(self):
         lines = []

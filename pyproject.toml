@@ -11,5 +11,8 @@ requires-python = ">=3.8"
 [project.scripts]
 catenna = "agent_pipeline.cli:main"
 
-[tool.setuptools]
-packages = ["agent_pipeline"]
+[tool.setuptools.packages.find]
+include = ["agent_pipeline*"]
+
+[tool.setuptools.package-data]
+"agent_pipeline.fixtures" = ["*.json"]

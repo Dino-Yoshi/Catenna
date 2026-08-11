@@ -4,16 +4,21 @@ Living document for `agent_pipeline/` — "Catenna", the Python orchestrator —
 and how it relates to the legacy bash pipeline (`Makefile`/`Makefile.legacy`)
 that lives in each *driven project*'s own repo. This repo is Catenna's
 standalone home and contains no Makefile of its own; invoke it via the
-installed `catenna <command> [task] ...` shortcut (`pip install -e .`), or
-directly as `python3 -m agent_pipeline.cli <command> [task] ...` — same
-code, same commands, both forms fully supported (see "Command table"
-below).
+installed `catenna <command> [task] ...` shortcut (`pip install -e .` or
+`pip install .`), or directly as
+`python3 -m agent_pipeline.cli <command> [task] ...` — same code, same
+commands, both forms fully supported (see "Command table" below).
 
 This snapshot reflects the system through Phase 5 of the original redesign
 (history below) plus the post-extraction hardening pass that has followed
 on branch `v1-fixes`/`v1-cleanup`/`v1-simplification` (see "Post-Phase-5
-hardening" below and the Changelog at the bottom). 339 tests, all green:
+hardening" below and the Changelog at the bottom). The full unittest suite
+is expected to stay green:
 `python3 -m unittest discover -s agent_pipeline/tests`.
+
+Non-editable installs include Catenna's runtime mock fixtures as package
+data and include `agent_pipeline/tests` for installed verification
+commands.
 
 **Relocation note (2026-08-05):** Phases 0-5 below were built and tested
 while this code lived at `tools/agent_pipeline/` (and docs at
@@ -246,7 +251,11 @@ Key modules:
   is `true` only if at least one such command is configured, attempted, and
   none failed; zero configured commands makes Stage 6 auto-verify
   categorically ineligible for that project regardless of Catenna's own
-  test results (see "Stage 6 auto-verification" and "Known gaps"). All
+  test results. The report and `catenna verify` output also include
+  `driven_project_checks_configured`, `driven_project_check_count`, and
+  `driven_project_verification_reason` so "no commands configured" is
+  distinguishable from a configured command failure (see "Stage 6
+  auto-verification" and "Known gaps"). All
   subprocess checks reuse `real_runner.run_to_files` rather than an ad-hoc
   subprocess pattern. Writes `<task>/05_verification_report.{json,md}` and,
   when `05_implementation_manifest.json` exists for the task, fills in that
@@ -361,7 +370,9 @@ that would violate an `independent_from` constraint.
   Phase 4's cross-task cooldown windows are always
   `default_cooldown_seconds`-based in practice, never a genuine CLI-reported
   reset time, and `rate_limit` without a credible reset still hard-blocks a
-  task outright. See [phase-4-handoff.md](handoffs/phase-4-handoff.md).
+  task outright. Current committed task artifacts and run metadata still do
+  not include a confirmed provider reset-time schema; add parsing only when a
+  real fixture exists. See [phase-4-handoff.md](handoffs/phase-4-handoff.md).
 - `usage_summary`'s agy extraction (`stream_events.py`) is unconfirmed
   against a real Antigravity CLI fixture — it will silently return `None`
   for agy unless agy's real `result` event happens to match the speculative
@@ -382,7 +393,9 @@ that would violate an `independent_from` constraint.
 - `pipeline-tail`'s live view still only shows "thinking..." as a status
   line for claude, not the actual reasoning text streaming in — Phase 5
   scoped reasoning visibility to post-hoc (`pipeline-report`/
-  `pipeline-brief`'s excerpt), not live-tail.
+  `pipeline-brief`'s excerpt), not live-tail. Do not stream hidden or
+  provider-private reasoning text live unless the provider schema and product
+  policy make that explicitly appropriate.
 
 ## Command table
 

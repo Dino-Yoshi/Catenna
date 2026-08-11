@@ -9,11 +9,12 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
 
-from .artifacts import CONTRACTS, manual_test_decision, parse_gate, sha256_file, useful_partial, validate_file, validate_text
+from .artifacts import CONTRACTS, manual_test_decision, sha256_file, useful_partial, validate_file, validate_text
 from . import color
 from .config import ConfigError, configured_candidates, agent_config, load_config
 from .failures import (
@@ -25,8 +26,6 @@ from .failures import (
     EXIT_SUCCESS,
     EXIT_VALIDATION,
     FAILURE_CLASS_EMPTY_OUTPUT,
-    FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED,
-    FAILURE_CLASS_GATE_REJECTED,
     FAILURE_CLASS_MALFORMED_ARTIFACT,
     FAILURE_CLASS_MALFORMED_OVERSEER,
     FAILURE_CLASS_MAX_TURNS,
@@ -42,14 +41,17 @@ from .failures import (
 )
 from .locking import LockError, TaskLock, explicit_unlock
 from .mock_agent import MockAgent, valid_artifact
-from .manifest import capture_dirty_baseline, git_status, validate_manifest, write_manifest
+from .manifest import capture_dirty_baseline, git_status, write_manifest
 from .overseer import fallback_handoff, parse_overseer_candidate, upgrade_to_auto_verified, write_handoff_files
 from .policies import choose_agent
 from .prompts import render_prompt
 from .real_runner import invoke_agent
 from .runner import atomic_finalize, preserve_failed
 from .state import CorruptState, STAGE_ORDER, append_log, load_state, new_state, orchestrator_dir, reconcile_artifacts, write_state_atomic
+from . import decision as decision_module
+from . import gates as gates_module
 from . import report as report_module
+from . import stage5 as stage5_module
 from . import tail as tail_module
 from . import usage
 from . import verification
@@ -61,7 +63,7 @@ TASKS_ROOT = REPO_ROOT / ".agent-pipeline" / "tasks"
 # anything about the project being driven, so they live with the package
 # (independent of which project's directory is REPO_ROOT/cwd) rather than
 # under the driven project's .agent-pipeline/.
-PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_ROOT = Path(__file__).resolve().parent
 FIXTURES_ROOT = PACKAGE_ROOT / "fixtures"
 SCENARIO_PATH = FIXTURES_ROOT / "mock_scenarios.json"
 USAGE_ROOT = REPO_ROOT / ".agent-pipeline" / "usage"
@@ -316,6 +318,14 @@ def pipeline_verify(task, run_build=False):
 
     print("task: %s" % task)
     print("overall_status: %s" % pass_fail_color(report["overall_status"]))
+    print("driven_project_checks_configured: %s (%d)" % (
+        str(bool(report.get("driven_project_checks_configured"))).lower(),
+        int(report.get("driven_project_check_count") or 0),
+    ))
+    print("driven_project_verified: %s (%s)" % (
+        str(bool(report.get("driven_project_verified"))).lower(),
+        report.get("driven_project_verification_reason", "unknown"),
+    ))
     for check in report["checks"]:
         if "exit_code" in check:
             duration_seconds = check.get("duration_seconds")
@@ -650,94 +660,11 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
 
 
 def run_stage4_gate_loop(task_dir, state, config, assignments):
-    if "04_gate" in state.get("completed_stages", []) and accepted_stage4_gate(task_dir)["accepted"]:
-        return EXIT_SUCCESS
-    max_passes = int(config.get("max_gate_passes", 2))
-    pass_number = len(state.get("stage_gate_passes") or []) + 1
-    force_brief = pass_number > 1 or "04" not in state.get("completed_stages", [])
-    force_audit = pass_number > 1 or "04_gate" not in state.get("completed_stages", [])
-    previous_rejection = None
-    while pass_number <= max_passes:
-        code = ensure_real_stage(
-            task_dir,
-            state,
-            config,
-            "04",
-            "read-only",
-            assignments,
-            pass_number=pass_number,
-            force=force_brief,
-            extra_context=stage4_rejected_gate_context(task_dir, state, pass_number),
-        )
-        if code != EXIT_SUCCESS:
-            return code
-        reconcile_artifacts(task_dir, state, read_only=False)
-        archive_stage4_brief_pass(task_dir, pass_number)
-        if previous_rejection:
-            new_brief_hash = sha256_file(task_dir / CONTRACTS["04"].filename)
-            current_audit_hash = sha256_file(task_dir / CONTRACTS["04_gate"].filename) if (task_dir / CONTRACTS["04_gate"].filename).exists() else None
-            if new_brief_hash == previous_rejection["brief_hash"] and current_audit_hash == previous_rejection["audit_hash"]:
-                block_transition(
-                    task_dir,
-                    state,
-                    "04_gate",
-                    "Stage 4 revision output is identical to a previously rejected brief with unchanged audit feedback",
-                    FAILURE_CLASS_GATE_REJECTED,
-                    completed_through="04",
-                )
-                return EXIT_BLOCKED
-        code = ensure_real_stage(task_dir, state, config, "04_gate", "read-only", assignments, pass_number=pass_number, force=force_audit)
-        if code != EXIT_SUCCESS:
-            return code
-        reconcile_artifacts(task_dir, state, read_only=False)
-
-        gate = accepted_stage4_gate(task_dir)
-        record_gate_pass(task_dir, state, pass_number, gate)
-        append_log(task_dir, {"event": "stage4_gate_decision", "stage": "04_gate", "pass": pass_number, "accepted": bool(gate.get("accepted")), "valid": bool(gate.get("valid")), "classification": gate_classification(gate), "run_id": state.get("run_id")})
-        if gate["accepted"]:
-            return EXIT_SUCCESS
-        if not gate.get("valid"):
-            block_transition(task_dir, state, "04_gate", gate["reason"], FAILURE_CLASS_MALFORMED_ARTIFACT, completed_through="04")
-            return EXIT_BLOCKED
-        if pass_number >= max_passes:
-            append_log(task_dir, {"event": "stage4_pass_exhaustion", "stage": "04_gate", "pass": pass_number, "classification": FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED, "run_id": state.get("run_id")})
-            block_transition(task_dir, state, "04_gate", "Stage 4 gate remains rejected after %d bounded pass(es)" % max_passes, FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED, completed_through="04")
-            return EXIT_BLOCKED
-
-        previous_rejection = {
-            "brief_hash": sha256_file(task_dir / CONTRACTS["04"].filename),
-            "audit_hash": sha256_file(task_dir / CONTRACTS["04_gate"].filename),
-        }
-        append_log(task_dir, {"event": "retry_scheduled", "stage": "04", "pass": pass_number + 1, "classification": FAILURE_CLASS_GATE_REJECTED, "run_id": state.get("run_id")})
-        force_brief = True
-        pass_number += 1
-        force_audit = True
-    append_log(task_dir, {"event": "stage4_pass_exhaustion", "stage": "04_gate", "pass": pass_number - 1, "classification": FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED, "run_id": state.get("run_id")})
-    block_transition(task_dir, state, "04_gate", "Stage 4 gate pass limit exhausted", FAILURE_CLASS_GATE_PASS_LIMIT_EXHAUSTED, completed_through="04")
-    return EXIT_BLOCKED
+    return gates_module.run_stage4_gate_loop(task_dir, state, config, assignments, ensure_real_stage, block_transition)
 
 
 def stage4_rejected_gate_context(task_dir, state, pass_number):
-    if pass_number <= 1:
-        return None
-    passes = state.get("stage_gate_passes") or []
-    if not passes:
-        return None
-    latest = passes[-1]
-    if latest.get("accepted") is not False:
-        return None
-    gate_path = task_dir / CONTRACTS["04_gate"].filename
-    try:
-        gate_text = gate_path.read_text(encoding="utf-8")
-    except Exception:
-        return None
-    return "\n".join([
-        "Latest Stage 04 gate rejection feedback:",
-        "",
-        gate_text.rstrip(),
-        "",
-        "Revise Stage 04 using the feedback above.",
-    ]).rstrip() + "\n"
+    return gates_module.stage4_rejected_gate_context(task_dir, state, pass_number)
 
 
 def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
@@ -963,49 +890,19 @@ def load_cross_task_cooldowns(config):
 
 
 def accepted_stage4_gate(task_dir):
-    path = task_dir / CONTRACTS["04_gate"].filename
-    validation = validate_file(path, "04_gate", read_only=True)
-    if not validation["valid"]:
-        return {"accepted": False, "reason": validation["reason"], "valid": False}
-    parsed = parse_gate(path.read_text(encoding="utf-8"))
-    if not parsed.get("valid"):
-        return {"accepted": False, "reason": parsed["reason"], "valid": False}
-    if parsed["gate"].get("ready_for_implementation") is not True:
-        return {"accepted": False, "reason": "Stage 4 audit gate rejected implementation", "valid": True, "gate": parsed["gate"]}
-    return {"accepted": True, "reason": "accepted", "valid": True, "gate": parsed["gate"]}
+    return gates_module.accepted_stage4_gate(task_dir)
 
 
 def record_gate_pass(task_dir, state, pass_number, gate):
-    audit_path = task_dir / CONTRACTS["04_gate"].filename
-    pass_path = task_dir / ("04_final_brief_audit.pass-%d.md" % pass_number)
-    if audit_path.exists():
-        shutil.copyfile(str(audit_path), str(pass_path))
-    record = {
-        "pass": pass_number,
-        "accepted": bool(gate.get("accepted")),
-        "reason": gate.get("reason"),
-        "brief_hash": sha256_file(task_dir / CONTRACTS["04"].filename) if (task_dir / CONTRACTS["04"].filename).exists() else None,
-        "audit_hash": sha256_file(audit_path) if audit_path.exists() else None,
-        "recorded_at": now(),
-    }
-    existing = state.setdefault("stage_gate_passes", [])
-    if not any(item.get("pass") == pass_number and item.get("audit_hash") == record["audit_hash"] for item in existing):
-        existing.append(record)
+    return gates_module.record_gate_pass(task_dir, state, pass_number, gate)
 
 
 def archive_stage4_brief_pass(task_dir, pass_number):
-    brief_path = task_dir / CONTRACTS["04"].filename
-    pass_path = task_dir / ("04_final_codex_brief.pass-%d.md" % pass_number)
-    if brief_path.exists():
-        shutil.copyfile(str(brief_path), str(pass_path))
+    return gates_module.archive_stage4_brief_pass(task_dir, pass_number)
 
 
 def gate_classification(gate):
-    if not gate.get("valid"):
-        return FAILURE_CLASS_MALFORMED_ARTIFACT
-    if gate.get("accepted"):
-        return "accepted"
-    return FAILURE_CLASS_GATE_REJECTED
+    return gates_module.gate_classification(gate)
 
 
 def clamp_completed_prefix(state, completed_through):
@@ -1039,156 +936,27 @@ def block_transition(task_dir, state, stage_key, reason, failure_class, complete
 
 
 def stage5_report_provenance(task_dir, state):
-    report_path = task_dir / CONTRACTS["05"].filename
-    validation = validate_file(report_path, "05", read_only=True)
-    if not validation["valid"]:
-        return {"valid": False, "reason": "Stage 5 report is structurally invalid: " + validation["reason"], "failure_class": validation.get("failure_class", FAILURE_CLASS_MALFORMED_ARTIFACT)}
-    report_hash = sha256_file(report_path)
-    runs = state.get("real_stage_runs", {}).get("05") or []
-    for run in reversed(runs):
-        if not stage5_run_matches_report(run, report_path, report_hash, state):
-            continue
-        return {"valid": True, "run": run, "report_hash": report_hash}
-    return {"valid": False, "reason": "Stage 5 report exists but no matching successful real Stage 5 provenance record was found", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
+    return stage5_module.stage5_report_provenance(task_dir, state)
 
 
 def stage5_run_matches_report(run, report_path, report_hash, state):
-    if not isinstance(run, dict):
-        return False
-    required = ("candidate_artifact_path", "run_id", "pass_number", "attempt_number", "attempt_kind", "retry_reason", "agent", "execution_mode")
-    for key in required:
-        if run.get(key) in (None, ""):
-            return False
-    if run.get("execution_mode") != "workspace-write":
-        return False
-    if run.get("exit_code") not in (0, None):
-        return False
-    if run.get("failure_class") not in (None, FAILURE_CLASS_MAX_TURNS, FAILURE_CLASS_UNKNOWN_FAILURE):
-        return False
-    candidate = Path(run.get("candidate_artifact_path"))
-    if not candidate.exists() or not candidate.is_file():
-        return False
-    try:
-        candidate_hash = sha256_file(candidate)
-    except Exception:
-        return False
-    if candidate_hash != report_hash:
-        return False
-    if run.get("final_artifact_hash") and run.get("final_artifact_hash") != report_hash:
-        return False
-    run["final_artifact_hash"] = report_hash
-    run["final_artifact_path"] = str(report_path)
-    if not run.get("metadata_path") or not Path(run.get("metadata_path")).exists():
-        return False
-    if not run.get("stdout_path") or not Path(run.get("stdout_path")).exists():
-        return False
-    if not run.get("stderr_path") or not Path(run.get("stderr_path")).exists():
-        return False
-    if not run.get("dirty_baseline") and not state.get("dirty_baseline"):
-        return False
-    if not run.get("dirty_baseline"):
-        run["dirty_baseline"] = state.get("dirty_baseline")
-    return True
+    return stage5_module.stage5_run_matches_report(run, report_path, report_hash, state)
 
 
 def stage5_postprocessing_complete(task_dir, state):
-    report = stage5_report_provenance(task_dir, state)
-    if not report["valid"]:
-        return report
-    manifest_path = task_dir / "05_implementation_manifest.json"
-    if not manifest_path.exists():
-        return {"valid": False, "reason": "Stage 5 manifest is missing", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        validate_manifest(manifest)
-    except Exception as exc:
-        return {"valid": False, "reason": "Stage 5 manifest is invalid: " + str(exc), "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    manifest_run = manifest.get("stage5_run") or {}
-    if manifest.get("stage") != "05":
-        return {"valid": False, "reason": "Stage 5 manifest has wrong stage", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    if manifest_run.get("run_id") != report["run"].get("run_id"):
-        return {"valid": False, "reason": "Stage 5 manifest run id does not match current Stage 5 artifact", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    if manifest_run.get("candidate_artifact_path") != report["run"].get("candidate_artifact_path"):
-        return {"valid": False, "reason": "Stage 5 manifest candidate path does not match current Stage 5 artifact", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    if manifest_run.get("final_artifact_hash") != report["report_hash"]:
-        return {"valid": False, "reason": "Stage 5 manifest artifact hash does not match current Stage 5 report", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    overseer = state.get("overseer") or {}
-    required_paths = {
-        "json_path": task_dir / "05_supervisor_handoff.json",
-        "markdown_path": task_dir / "05_supervisor_handoff.md",
-        "legacy_path": task_dir / "handoff.md",
-    }
-    for key, expected in required_paths.items():
-        recorded = overseer.get(key)
-        if not recorded:
-            return {"valid": False, "reason": "Stage 5 handoff state is missing " + key, "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-        if Path(recorded) != expected or not expected.exists():
-            return {"valid": False, "reason": "Stage 5 handoff path is missing or inconsistent: " + key, "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    try:
-        parse_overseer_candidate(json.loads(required_paths["json_path"].read_text(encoding="utf-8")))
-    except Exception as exc:
-        return {"valid": False, "reason": "Stage 5 supervisor handoff JSON is invalid: " + str(exc), "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    if state.get("state") != "awaiting_human_test":
-        return {"valid": False, "reason": "State is not awaiting human Stage 6 testing", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    if state.get("current_stage") != "06":
-        return {"valid": False, "reason": "Current stage is not 06", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    checkpoint = state.get("human_checkpoint")
-    if not isinstance(checkpoint, dict) or checkpoint.get("stage") != "06":
-        return {"valid": False, "reason": "Human checkpoint for Stage 6 is missing", "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
-    return {"valid": True, "run": report["run"], "manifest": manifest}
+    return stage5_module.stage5_postprocessing_complete(task_dir, state, report_func=stage5_report_provenance)
 
 
 def any_stage5_postprocessing_present(task_dir, state):
-    if state.get("manifest") or state.get("overseer") or state.get("human_checkpoint"):
-        return True
-    for name in ("05_implementation_manifest.json", "05_supervisor_handoff.json", "05_supervisor_handoff.md", "handoff.md"):
-        if (task_dir / name).exists():
-            return True
-    return False
+    return stage5_module.any_stage5_postprocessing_present(task_dir, state)
 
 
 def checkpoint_noop_eligible(task_dir, state):
-    if state.get("state") != "awaiting_human_test" or state.get("current_stage") != "06":
-        return {"eligible": False, "reason": "not at human checkpoint"}
-    post = stage5_postprocessing_complete(task_dir, state)
-    if not post["valid"]:
-        return {"eligible": False, "reason": post["reason"]}
-    stage06_validation = validate_file(task_dir / CONTRACTS["06"].filename, "06", read_only=True)
-    if stage06_validation["valid"]:
-        return {"eligible": False, "reason": "Stage 6 manual test notes are ready; resuming to drive Stage 7/8"}
-    checkpoint = state.get("human_checkpoint") or {}
-    recorded = checkpoint.get("noop_hashes")
-    if not isinstance(recorded, dict):
-        return {"eligible": False, "reason": "checkpoint hash set is missing"}
-    current = checkpoint_hashes(task_dir, state)
-    if current != recorded:
-        return {"eligible": False, "reason": "checkpoint hash set changed"}
-    return {"eligible": True, "reason": "unchanged human checkpoint"}
+    return stage5_module.checkpoint_noop_eligible(task_dir, state, postprocessing_func=stage5_postprocessing_complete)
 
 
 def checkpoint_hashes(task_dir, state):
-    paths = []
-    for key in ("00", "01", "02", "03", "04", "04_gate", "05"):
-        paths.append(task_dir / CONTRACTS[key].filename)
-    for name in ("05_implementation_manifest.json", "05_supervisor_handoff.json", "05_supervisor_handoff.md", "handoff.md"):
-        paths.append(task_dir / name)
-    stage5 = last_stage_result(state, "05")
-    if stage5 and stage5.get("candidate_artifact_path"):
-        candidate = Path(stage5["candidate_artifact_path"])
-        final_report = task_dir / CONTRACTS["05"].filename
-        try:
-            if candidate.resolve() != final_report.resolve():
-                paths.append(candidate)
-        except Exception:
-            paths.append(candidate)
-    result = {}
-    for path in paths:
-        label = str(path)
-        if not path.exists() or not path.is_file():
-            result[label] = None
-        else:
-            result[label] = sha256_file(path)
-    return result
+    return stage5_module.checkpoint_hashes(task_dir, state)
 
 
 def run_overseer_or_fallback(task_dir, state, config, manifest, assignments, verification_report=None):
@@ -1270,75 +1038,13 @@ def render_auto_stage06_notes(verification_report):
     return "\n".join(lines).rstrip() + "\n"
 
 
-_DECISION_RANK = {"accept": 0, "needs_followup": 1, "reject": 2}
-
-
-def worse_decision(a, b):
-    return a if _DECISION_RANK.get(a, 2) >= _DECISION_RANK.get(b, 2) else b
-
-
-def last_nonempty_line(text):
-    for line in reversed(text.splitlines()):
-        if line.strip():
-            return line.strip()
-    return None
-
-
-def render_stage08_decision(final_decision, stage06_outcome, stage07_verdict):
-    boxes = []
-    for key, label in (("accept", "Accept"), ("reject", "Reject"), ("needs_followup", "Needs follow-up")):
-        mark = "x" if key == final_decision else " "
-        boxes.append("- [%s] %s" % (mark, label))
-    follow_up = (
-        "None -- accepted automatically."
-        if final_decision == "accept"
-        else "See Stage 7 diff review's \"Required fixes\" section before merging."
-    )
-    lines = [
-        CONTRACTS["08"].heading,
-        "",
-        "## Decision",
-        "",
-    ]
-    lines.extend(boxes)
-    lines.extend([
-        "",
-        "## Reason",
-        "",
-        "Derived automatically from the Stage 6 manual test result (%s) and the Stage 7" % stage06_outcome,
-        "diff review verdict (%s). See 06_manual_test_notes.md and 07_diff_review.md" % stage07_verdict,
-        "for full detail.",
-        "",
-        "## Follow-up task, if needed",
-        "",
-        follow_up,
-    ])
-    return "\n".join(lines).rstrip() + "\n"
+last_nonempty_line = decision_module.last_nonempty_line
+render_stage08_decision = decision_module.render_stage08_decision
+worse_decision = decision_module.worse_decision
 
 
 def ensure_stage08_decision(task_dir, state):
-    if "08" not in state.get("completed_stages", []):
-        stage06_text = (task_dir / CONTRACTS["06"].filename).read_text(encoding="utf-8")
-        stage07_text = (task_dir / CONTRACTS["07"].filename).read_text(encoding="utf-8")
-        stage06_outcome = manual_test_decision(stage06_text) or "needs_followup"
-        stage07_verdict = last_nonempty_line(stage07_text) or "needs_followup"
-        final_decision = worse_decision(stage06_outcome, stage07_verdict)
-        content = render_stage08_decision(final_decision, stage06_outcome, stage07_verdict)
-        result = atomic_finalize(task_dir, "08", content)
-        if not result["finalized"]:
-            block_transition(task_dir, state, "08", result["validation"]["reason"], result["validation"].get("failure_class"), completed_through="07")
-            return EXIT_BLOCKED, None
-        append_log(task_dir, {
-            "event": "stage8_decision_synthesized",
-            "stage": "08",
-            "decision": final_decision,
-            "stage06_outcome": stage06_outcome,
-            "stage07_verdict": stage07_verdict,
-            "run_id": state.get("run_id"),
-        })
-    stage08_text = (task_dir / CONTRACTS["08"].filename).read_text(encoding="utf-8")
-    final_decision = manual_test_decision(stage08_text) or "needs_followup"
-    return EXIT_SUCCESS, final_decision
+    return decision_module.ensure_stage08_decision(task_dir, state, block_transition)
 
 
 def source_snapshot():
@@ -1666,8 +1372,7 @@ def now():
 
 def mock_test():
     scenarios = load_scenarios()
-    run_root = FIXTURES_ROOT / "_mock_runs"
-    run_root.mkdir(parents=True, exist_ok=True)
+    run_root = Path(tempfile.mkdtemp(prefix="catenna-mock-runs-"))
     suite_root = run_root / ("suite-" + uuid.uuid4().hex[:12])
     suite_root.mkdir()
     original_tasks_root = TASKS_ROOT
@@ -1711,7 +1416,7 @@ def mock_test():
             failed.append("resume_reconciliation: " + resume_result)
     finally:
         globals()["TASKS_ROOT"] = original_tasks_root
-        shutil.rmtree(str(suite_root), ignore_errors=True)
+        shutil.rmtree(str(run_root), ignore_errors=True)
     if failed:
         print("mock tests failed:")
         for item in failed:

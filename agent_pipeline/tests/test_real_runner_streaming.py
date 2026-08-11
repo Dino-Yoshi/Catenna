@@ -122,6 +122,8 @@ class StreamingRunnerTests(unittest.TestCase):
             running = json.loads(sidecar.read_text(encoding="utf-8"))
             assert running["status"] == "running"
             assert running["run_id"] == "run-sidecar"
+            assert isinstance(running["pid"], int)
+            assert running["host"]
             with open(out_path, "w") as handle:
                 handle.write("codex final answer")
             print('{"type":"thread.started"}')

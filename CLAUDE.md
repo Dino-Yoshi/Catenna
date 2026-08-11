@@ -26,15 +26,12 @@ Two equivalent forms, same code:
   process was started. Check the verification report, `.orchestrator/background_verify.log`,
   or follow verification stdout with unfiltered `catenna tail <task>`.
 
-**Editable install only.** `pyproject.toml`'s setuptools config only lists
-`packages = ["agent_pipeline"]` — minimal on purpose. `pip install -e .` is
-fine (the source tree stays put, so `FIXTURES_ROOT`/`load_scenarios` and
-`agent_pipeline/tests` keep resolving correctly relative to `__file__`). A
-**non-editable** `pip install .` would silently omit top-level `fixtures/`
-and `agent_pipeline/tests`, breaking the installed `catenna`'s
-`mock-test`/`mock-run`/`verify` commands. Nobody has needed a non-editable
-install yet (single-maintainer, dev-local tool); if that changes, package
-`fixtures/` as data and re-test before relying on it.
+`pip install -e .` and non-editable `pip install .` are both supported.
+Runtime mock fixtures live under `agent_pipeline/fixtures/` as package data,
+and `agent_pipeline/tests` is included as a package so installed
+`mock-test`/`mock-run`/`verify` commands do not depend on the source checkout
+layout. `mock-test` writes its scratch task data under a temp directory, not
+next to the installed fixtures.
 
 ## The `task` argument
 
