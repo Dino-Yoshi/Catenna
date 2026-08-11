@@ -350,6 +350,7 @@ class ControllerReliabilityTests(unittest.TestCase):
                 "cross_task_cooldowns": {"enabled": False},
                 "usage_ledger": {"enabled": False},
                 "reasoning_capture": {"enabled": True},
+                "cost_control": {"enabled": True},
             }
             calls = []
 
@@ -395,6 +396,22 @@ class ControllerReliabilityTests(unittest.TestCase):
             "roles": {"02": {"primary": "codex", "fallbacks": []}},
             "agents": {"codex": {"enabled": True, "workspace_write": False}},
             "cross_task_cooldowns": {"enabled": False},
+            "cost_control": {"enabled": True},
+        }
+
+        selected = controller.merge_matching_stage_override_into_config(cfg, state, "02", "codex")
+
+        self.assertIs(selected, cfg)
+
+    def test_merge_matching_stage_override_ignored_when_cost_control_disabled(self):
+        state = new_state("task", "run-test")
+        state["stage_overrides"] = {"02": {"codex": {"model": "cheap-codex"}}}
+        cfg = {
+            "stage_attempt_budget": 1,
+            "roles": {"02": {"primary": "codex", "fallbacks": []}},
+            "agents": {"codex": {"enabled": True, "workspace_write": False}},
+            "cross_task_cooldowns": {"enabled": False},
+            "cost_control": {"enabled": False},
         }
 
         selected = controller.merge_matching_stage_override_into_config(cfg, state, "02", "codex")
