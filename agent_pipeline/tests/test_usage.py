@@ -27,6 +27,29 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(entries[0]["task"], "task-a")
         self.assertEqual(entries[0]["usage"]["input_tokens"], 10)
 
+    def test_build_entry_records_runtime_model_and_retry_metadata(self):
+        entry = usage.build_entry(
+            "task-a",
+            "run-1",
+            "04_gate",
+            "claude",
+            {
+                "duration_seconds": 1.5,
+                "exit_code": 0,
+                "failure_class": None,
+                "model": "claude-haiku-4-5",
+                "pass_number": 2,
+                "attempt_number": 3,
+                "retry_reason": "max-turn completion retry",
+            },
+            {"input_tokens": 10},
+        )
+
+        self.assertEqual(entry["model"], "claude-haiku-4-5")
+        self.assertEqual(entry["pass_number"], 2)
+        self.assertEqual(entry["attempt_number"], 3)
+        self.assertEqual(entry["retry_reason"], "max-turn completion retry")
+
     def test_read_missing_ledger_returns_empty(self):
         self.assertEqual(usage.read_entries(self.ledger_path), [])
 
