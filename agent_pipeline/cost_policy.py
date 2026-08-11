@@ -37,7 +37,11 @@ def compute_stage_overrides(config, ledger_entries, assignments=None):
             effective = _effective_candidate(candidate)
             if not effective:
                 continue
-            if _stage_eligible(config, stage_key, ledger_entries, agent):
+            candidate_model = effective.get("model")
+            if (
+                _stage_eligible(config, stage_key, ledger_entries, agent, candidate_model)
+                and _candidate_confirmed_safe(config, stage_key, ledger_entries, agent, candidate_model)
+            ):
                 stage_overrides[agent] = effective
         if stage_overrides:
             overrides[stage_key] = stage_overrides
@@ -55,12 +59,32 @@ def _effective_candidate(candidate):
     return effective
 
 
-def _stage_eligible(config, stage_key, ledger_entries, agent):
-    cost_control = config.get("cost_control", {})
+def _stage_eligible(config, stage_key, ledger_entries, agent, candidate_model=None):
     matching = [
         entry for entry in ledger_entries
         if entry.get("stage") == stage_key and entry.get("agent") == agent
+        and (candidate_model is None or entry.get("model") != candidate_model)
     ]
+    return _history_reliable(config, matching)
+
+
+def _candidate_confirmed_safe(config, stage_key, ledger_entries, agent, candidate_model):
+    if candidate_model is None:
+        return True
+    matching = [
+        entry for entry in ledger_entries
+        if entry.get("stage") == stage_key
+        and entry.get("agent") == agent
+        and entry.get("model") == candidate_model
+    ]
+    cost_control = config.get("cost_control", {})
+    if len(matching) < int(cost_control.get("min_samples", 1)):
+        return True
+    return _history_reliable(config, matching)
+
+
+def _history_reliable(config, matching):
+    cost_control = config.get("cost_control", {})
     if len(matching) < int(cost_control.get("min_samples", 1)):
         return False
     for entry in matching:
