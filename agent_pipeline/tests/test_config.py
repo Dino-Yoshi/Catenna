@@ -121,6 +121,68 @@ class ReasoningCaptureConfigTests(unittest.TestCase):
         cfg["roles"]["04"]["effort_override"] = "low"
         self.assertTrue(config.validate_config(cfg))
 
+    def test_default_cost_control_is_disabled_and_valid(self):
+        self.assertFalse(config.DEFAULT_CONFIG["cost_control"]["enabled"])
+        self.assertEqual(config.DEFAULT_CONFIG["cost_control"]["min_samples"], 5)
+        self.assertEqual(config.DEFAULT_CONFIG["cost_control"]["eligible_stages"], ["02", "03", "04", "04_gate", "07"])
+        self.assertTrue(config.validate_config(config.deep_copy(config.DEFAULT_CONFIG)))
+
+    def test_cost_control_validation_rejects_invalid_scalar_fields(self):
+        cases = [
+            ("enabled", "true"),
+            ("min_samples", True),
+            ("min_samples", 0),
+            ("max_retry_rate", True),
+            ("max_retry_rate", -0.1),
+            ("max_retry_rate", 1.1),
+        ]
+        for field, value in cases:
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad["cost_control"][field] = value
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("cost_control." + field, str(raised.exception))
+
+    def test_cost_control_eligible_stages_must_be_configured_strings(self):
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["cost_control"]["eligible_stages"] = ["02", 3]
+        with self.assertRaises(config.ConfigError):
+            config.validate_config(bad)
+
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["cost_control"]["eligible_stages"] = ["02", "missing"]
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("missing", str(raised.exception))
+
+    def test_cost_control_candidates_allow_null_empty_and_partial_mappings(self):
+        cfg = config.deep_copy(config.DEFAULT_CONFIG)
+        cfg["cost_control"]["downgrade_candidates"] = {
+            "claude": {},
+            "codex": {"model": "mini"},
+            "agy": {"effort": "low"},
+            "other": None,
+        }
+        self.assertTrue(config.validate_config(cfg))
+
+    def test_cost_control_candidate_values_must_be_mappings_with_string_fields(self):
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["cost_control"]["downgrade_candidates"] = []
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("cost_control.downgrade_candidates", str(raised.exception))
+
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["cost_control"]["downgrade_candidates"]["claude"] = "cheap"
+        with self.assertRaises(config.ConfigError):
+            config.validate_config(bad)
+
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["cost_control"]["downgrade_candidates"]["claude"] = {"model": 123}
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("model", str(raised.exception))
+
     def test_valid_driven_project_commands_are_accepted(self):
         cfg = config.deep_copy(config.DEFAULT_CONFIG)
         cfg["verification"]["driven_project_commands"] = [
