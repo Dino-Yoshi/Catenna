@@ -11,7 +11,7 @@ from pathlib import Path
 from agent_pipeline import controller
 from agent_pipeline import prompts
 from agent_pipeline import usage
-from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION
+from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION, FAILURE_CLASS_MAX_TURNS
 from agent_pipeline.mock_agent import gate_artifact, valid_artifact
 from agent_pipeline.runner import atomic_finalize
 from agent_pipeline.state import CONTRACTS, load_state, new_state, reconcile_artifacts, state_path, write_state_atomic
@@ -249,6 +249,157 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(code, EXIT_BLOCKED)
             self.assertEqual(state["completed_stages"], [])
             self.assertEqual(state["current_stage"], "00")
+
+    def test_cost_control_disabled_does_not_read_ledger_or_write_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "cost-disabled"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            state = new_state(task, "run-test")
+            events = []
+
+            original_read_entries = controller.usage.read_entries
+            original_append_log = controller.append_log
+            original_ensure = controller.ensure_real_stage
+            controller.usage.read_entries = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ledger read"))
+            controller.append_log = lambda task_dir_arg, event: events.append(event)
+            controller.ensure_real_stage = lambda *args, **kwargs: EXIT_BLOCKED
+            self.addCleanup(lambda: setattr(controller.usage, "read_entries", original_read_entries))
+            self.addCleanup(lambda: setattr(controller, "append_log", original_append_log))
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original_ensure))
+
+            code = controller.run_real_pipeline(task_dir, task, state, {}, allow_dirty=True)
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertNotIn("stage_overrides", state)
+            self.assertNotIn("cost_policy_applied", [event.get("event") for event in events])
+
+    def test_cost_control_enabled_with_disabled_ledger_records_empty_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "cost-enabled-ledger-disabled"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            state = new_state(task, "run-test")
+            events = []
+            cfg = {
+                "cost_control": {
+                    "enabled": True,
+                    "min_samples": 2,
+                    "max_retry_rate": 0.5,
+                    "eligible_stages": ["02"],
+                    "downgrade_candidates": {"claude": {"effort": "low"}},
+                },
+                "usage_ledger": {"enabled": False},
+                "roles": {"02": {"primary": "claude", "fallbacks": []}},
+                "max_gate_passes": 1,
+            }
+
+            original_read_entries = controller.usage.read_entries
+            original_append_log = controller.append_log
+            original_ensure = controller.ensure_real_stage
+            controller.usage.read_entries = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ledger read"))
+            controller.append_log = lambda task_dir_arg, event: events.append(event)
+            controller.ensure_real_stage = lambda *args, **kwargs: EXIT_BLOCKED
+            self.addCleanup(lambda: setattr(controller.usage, "read_entries", original_read_entries))
+            self.addCleanup(lambda: setattr(controller, "append_log", original_append_log))
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original_ensure))
+
+            code = controller.run_real_pipeline(task_dir, task, state, cfg, allow_dirty=True)
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(state["stage_overrides"], {})
+            self.assertEqual([event for event in events if event.get("event") == "cost_policy_applied"][0]["overrides"], {})
+
+    def test_merge_stage_override_returns_fresh_config_without_mutating_original(self):
+        original = {
+            "roles": {
+                "02": {"primary": "claude", "fallbacks": []},
+                "03": {"primary": "codex", "fallbacks": []},
+            },
+            "other": True,
+        }
+
+        merged = controller.merge_stage_override_into_config(original, "02", {"model": "cheap", "effort": "low"})
+
+        self.assertIsNot(merged, original)
+        self.assertIsNot(merged["roles"], original["roles"])
+        self.assertIsNot(merged["roles"]["02"], original["roles"]["02"])
+        self.assertIs(merged["roles"]["03"], original["roles"]["03"])
+        self.assertEqual(merged["roles"]["02"]["model_override"], "cheap")
+        self.assertEqual(merged["roles"]["02"]["effort_override"], "low")
+        self.assertNotIn("model_override", original["roles"]["02"])
+
+    def test_ensure_real_stage_applies_override_only_for_selected_agent_and_reuses_for_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "cost-dispatch"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            state = new_state(task, "run-test")
+            state["stage_overrides"] = {"02": {"claude": {"model": "cheap-claude", "effort": "low"}}}
+            cfg = {
+                "stage_attempt_budget": 1,
+                "roles": {"02": {"primary": "claude", "fallbacks": ["codex"]}},
+                "agents": {
+                    "claude": {"enabled": True, "workspace_write": False},
+                    "codex": {"enabled": True, "workspace_write": False},
+                },
+                "cross_task_cooldowns": {"enabled": False},
+                "usage_ledger": {"enabled": False},
+                "reasoning_capture": {"enabled": True},
+            }
+            calls = []
+
+            def fake_invoke(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, agent, pass_number, **kwargs):
+                calls.append(config_arg)
+                candidate_path = task_dir_arg / ("candidate-%d.md" % len(calls))
+                if len(calls) == 1:
+                    candidate_path.write_text("# Stage 2 - Technical specification\n\n## Summary\n\nPartial.\n", encoding="utf-8")
+                    failure_class = FAILURE_CLASS_MAX_TURNS
+                else:
+                    candidate_path.write_text(valid_artifact("02"), encoding="utf-8")
+                    failure_class = None
+                return {
+                    "candidate_artifact_path": str(candidate_path),
+                    "failure_class": failure_class,
+                    "exit_code": 1 if failure_class else 0,
+                    "metadata_path": str(candidate_path) + ".json",
+                    "attempt_number": kwargs.get("attempt_number"),
+                    "_source_before": "",
+                }
+
+            original_invoke = controller.invoke_stage
+            original_source_snapshot = controller.source_snapshot
+            controller.invoke_stage = fake_invoke
+            controller.source_snapshot = lambda: ""
+            self.addCleanup(lambda: setattr(controller, "invoke_stage", original_invoke))
+            self.addCleanup(lambda: setattr(controller, "source_snapshot", original_source_snapshot))
+
+            code = controller.ensure_real_stage(task_dir, state, cfg, "02", "read-only", {})
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["roles"]["02"]["model_override"], "cheap-claude")
+            self.assertEqual(calls[0]["roles"]["02"]["effort_override"], "low")
+            self.assertEqual(calls[1]["roles"]["02"]["model_override"], "cheap-claude")
+            self.assertNotIn("model_override", cfg["roles"]["02"])
+
+    def test_ensure_real_stage_does_not_apply_override_for_different_selected_agent(self):
+        state = new_state("task", "run-test")
+        state["stage_overrides"] = {"02": {"claude": {"model": "cheap-claude"}}}
+        cfg = {
+            "stage_attempt_budget": 1,
+            "roles": {"02": {"primary": "codex", "fallbacks": []}},
+            "agents": {"codex": {"enabled": True, "workspace_write": False}},
+            "cross_task_cooldowns": {"enabled": False},
+        }
+
+        selected = controller.merge_matching_stage_override_into_config(cfg, state, "02", "codex")
+
+        self.assertIs(selected, cfg)
 
     def test_fresh_stage5_success_is_checkpointed_before_postprocessing(self):
         with tempfile.TemporaryDirectory() as tmp:
