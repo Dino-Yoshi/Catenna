@@ -2,6 +2,7 @@ from __future__ import print_function
 
 import io
 import inspect
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -17,6 +18,14 @@ from agent_pipeline.state import CONTRACTS, load_state, new_state, reconcile_art
 
 
 class ControllerReliabilityTests(unittest.TestCase):
+    def setUp(self):
+        # Keep captured-stdout assertions independent from the caller's shell,
+        # regardless of how the test runner imports this module.
+        for key in ("FORCE_COLOR", "NO_COLOR"):
+            original = os.environ.pop(key, None)
+            if original is not None:
+                self.addCleanup(os.environ.__setitem__, key, original)
+
     def with_tasks_root(self, root):
         original = controller.TASKS_ROOT
         controller.TASKS_ROOT = root
