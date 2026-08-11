@@ -678,6 +678,8 @@ def stage4_rejected_gate_context(task_dir, state, pass_number):
 
 
 def merge_matching_stage_override_into_config(config, state, stage_key, agent):
+    if not config.get("cost_control", {}).get("enabled", False):
+        return config
     override = ((state.get("stage_overrides") or {}).get(stage_key) or {}).get(agent)
     if not override:
         return config
