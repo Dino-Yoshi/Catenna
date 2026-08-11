@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .artifacts import CONTRACTS, manual_test_decision, sha256_file, useful_partial, validate_file, validate_text
 from . import color
+from . import cost_policy
 from .config import ConfigError, configured_candidates, agent_config, load_config
 from .failures import (
     BANNED_COMMAND_WORDS,
@@ -545,6 +546,15 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
             return EXIT_BLOCKED
 
     reconcile_artifacts(task_dir, state, read_only=False)
+    cost_control = config.get("cost_control", {})
+    if cost_control.get("enabled", False):
+        if config.get("usage_ledger", {}).get("enabled", True):
+            ledger_entries = usage.read_entries(usage_ledger_path())
+        else:
+            ledger_entries = []
+        overrides = cost_policy.compute_stage_overrides(config, ledger_entries)
+        state["stage_overrides"] = overrides
+        append_log(task_dir, {"event": "cost_policy_applied", "overrides": overrides, "run_id": state.get("run_id")})
     assignments = dict(state.get("stage_agents") or {})
 
     for stage_key in ("02", "03"):
@@ -667,6 +677,26 @@ def stage4_rejected_gate_context(task_dir, state, pass_number):
     return gates_module.stage4_rejected_gate_context(task_dir, state, pass_number)
 
 
+def merge_matching_stage_override_into_config(config, state, stage_key, agent):
+    override = ((state.get("stage_overrides") or {}).get(stage_key) or {}).get(agent)
+    if not override:
+        return config
+    return merge_stage_override_into_config(config, stage_key, override)
+
+
+def merge_stage_override_into_config(config, stage_key, override):
+    updated = dict(config)
+    roles = dict(config.get("roles", {}))
+    role = dict(roles.get(stage_key, {}))
+    if override.get("model") is not None:
+        role["model_override"] = override.get("model")
+    if override.get("effort") is not None:
+        role["effort_override"] = override.get("effort")
+    roles[stage_key] = role
+    updated["roles"] = roles
+    return updated
+
+
 def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
     pending = state.get("pending_approval") or {}
     awaiting_retry_approval = state.get("state") == "awaiting_retry_approval"
@@ -699,6 +729,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             block_transition(task_dir, state, stage_key, "no configured capable runner exists for required role/mode", FAILURE_CLASS_SOURCE_FAILURE)
             return EXIT_BLOCKED
         agent = route["agent"]
+        dispatch_config = merge_matching_stage_override_into_config(config, state, stage_key, agent)
         if route.get("fallback") or route.get("degraded"):
             if next_attempt_kind == "normal":
                 next_attempt_kind = "provider_fallback"
@@ -716,7 +747,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
         attempt_number = increment_attempt(state, stage_key)
         increment_agent_count(state, agent)
         append_log(task_dir, {"event": "stage_dispatch", "stage": stage_key, "pass": pass_number, "attempt": attempt_number, "provider": agent, "attempt_kind": next_attempt_kind, "retry_reason": next_retry_reason, "run_id": state.get("run_id")})
-        result = invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, attempt_number=attempt_number, attempt_kind=next_attempt_kind, retry_reason=next_retry_reason, extra_context=extra_context)
+        result = invoke_stage(task_dir, state, dispatch_config, stage_key, execution_mode, agent, pass_number, attempt_number=attempt_number, attempt_kind=next_attempt_kind, retry_reason=next_retry_reason, extra_context=extra_context)
         state.setdefault("real_stage_runs", {}).setdefault(stage_key, []).append(result)
         state.setdefault("execution_modes", {})[stage_key] = execution_mode
         source_after = None
@@ -761,7 +792,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             completion_attempt = increment_attempt(state, stage_key)
             increment_agent_count(state, agent)
             append_log(task_dir, {"event": "retry_scheduled", "stage": stage_key, "pass": pass_number, "attempt": completion_attempt, "provider": agent, "classification": FAILURE_CLASS_MAX_TURNS, "retry_reason": "max-turn completion retry", "run_id": state.get("run_id")})
-            completion = invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=output, attempt_number=completion_attempt, attempt_kind="completion_only_retry", retry_reason="max-turn completion retry", extra_context=extra_context)
+            completion = invoke_stage(task_dir, state, dispatch_config, stage_key, execution_mode, agent, pass_number, completion_for=output, attempt_number=completion_attempt, attempt_kind="completion_only_retry", retry_reason="max-turn completion retry", extra_context=extra_context)
             state.setdefault("real_stage_runs", {}).setdefault(stage_key, []).append(completion)
             completion_raw_output = read_candidate(completion)
             completion_output = normalize_stage_output(stage_key, completion_raw_output)
