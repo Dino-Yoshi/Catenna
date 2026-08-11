@@ -46,6 +46,10 @@ def build_entry(task, run_id, stage_key, agent, result, usage):
         "duration_seconds": result.get("duration_seconds"),
         "exit_code": result.get("exit_code"),
         "failure_class": result.get("failure_class"),
+        "model": result.get("model"),
+        "pass_number": result.get("pass_number"),
+        "attempt_number": result.get("attempt_number"),
+        "retry_reason": result.get("retry_reason"),
         "usage": usage,
     }
 
