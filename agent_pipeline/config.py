@@ -35,6 +35,17 @@ DEFAULT_CONFIG = {
     },
     "enable_auto_verified": True,
     "usage_ledger": {"enabled": True},
+    "cost_control": {
+        "enabled": False,
+        "min_samples": 5,
+        "max_retry_rate": 0.2,
+        "eligible_stages": ["02", "03", "04", "04_gate", "07"],
+        "downgrade_candidates": {
+            "claude": {"model": "claude-haiku-4-5", "effort": "low"},
+            "codex": None,
+            "agy": None,
+        },
+    },
     "cross_task_cooldowns": {"enabled": True, "default_cooldown_seconds": 900},
     "reasoning_capture": {"enabled": True},
     "agents": {
@@ -138,6 +149,7 @@ def validate_config(config):
     usage_ledger = config.get("usage_ledger", {})
     if not isinstance(usage_ledger, dict) or not isinstance(usage_ledger.get("enabled"), bool):
         raise ConfigError("usage_ledger.enabled must be a boolean")
+    validate_cost_control_config(config)
     cooldowns = config.get("cross_task_cooldowns", {})
     if not isinstance(cooldowns, dict) or not isinstance(cooldowns.get("enabled"), bool):
         raise ConfigError("cross_task_cooldowns.enabled must be a boolean")
@@ -191,6 +203,38 @@ def validate_verification_config(config):
             timeout = command.get("timeout_seconds")
             if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
                 raise ConfigError(prefix + ".timeout_seconds must be a positive integer")
+
+
+def validate_cost_control_config(config):
+    cost_control = config.get("cost_control", {})
+    if not isinstance(cost_control, Mapping):
+        raise ConfigError("cost_control must be a mapping")
+    if not isinstance(cost_control.get("enabled"), bool):
+        raise ConfigError("cost_control.enabled must be a boolean")
+    min_samples = cost_control.get("min_samples")
+    if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 1:
+        raise ConfigError("cost_control.min_samples must be a positive integer")
+    max_retry_rate = cost_control.get("max_retry_rate")
+    if isinstance(max_retry_rate, bool) or not isinstance(max_retry_rate, (int, float)) or max_retry_rate < 0 or max_retry_rate > 1:
+        raise ConfigError("cost_control.max_retry_rate must be a number in [0, 1]")
+    eligible_stages = cost_control.get("eligible_stages")
+    if not isinstance(eligible_stages, list) or not all(isinstance(stage, str) for stage in eligible_stages):
+        raise ConfigError("cost_control.eligible_stages must be a list of strings")
+    roles = config.get("roles", {})
+    for stage in eligible_stages:
+        if stage not in roles:
+            raise ConfigError("cost_control eligible stage %s is not configured in roles" % stage)
+    candidates = cost_control.get("downgrade_candidates")
+    if not isinstance(candidates, Mapping):
+        raise ConfigError("cost_control.downgrade_candidates must be a mapping")
+    for agent, candidate in candidates.items():
+        if candidate is None:
+            continue
+        if not isinstance(candidate, Mapping):
+            raise ConfigError("cost_control.downgrade_candidates.%s must be a mapping or null" % agent)
+        for field in ("model", "effort"):
+            if field in candidate and not isinstance(candidate.get(field), str):
+                raise ConfigError("cost_control.downgrade_candidates.%s.%s must be a string" % (agent, field))
 
 
 def validate_role_agent_references(config):
