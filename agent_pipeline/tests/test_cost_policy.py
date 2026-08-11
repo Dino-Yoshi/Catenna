@@ -19,14 +19,17 @@ class CostPolicyTests(unittest.TestCase):
         }
         return cfg
 
-    def entry(self, stage, agent, failure_class=None, attempt_number=1, pass_number=1):
-        return {
+    def entry(self, stage, agent, failure_class=None, attempt_number=1, pass_number=1, model=None):
+        entry = {
             "stage": stage,
             "agent": agent,
             "failure_class": failure_class,
             "attempt_number": attempt_number,
             "pass_number": pass_number,
         }
+        if model is not None:
+            entry["model"] = model
+        return entry
 
     def test_disabled_returns_empty(self):
         cfg = config.deep_copy(config.DEFAULT_CONFIG)
@@ -114,6 +117,89 @@ class CostPolicyTests(unittest.TestCase):
             self.entry("03", "codex"),
             self.entry("03", "agy"),
             self.entry("03", "agy"),
+        ]
+
+        self.assertEqual(cost_policy.compute_stage_overrides(cfg, entries), {"03": {"agy": {"effort": "low"}}})
+
+    def test_cold_start_candidate_history_below_min_samples_still_applies_override(self):
+        cfg = self.enabled_config()
+        entries = [
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", failure_class="timeout", model="claude-haiku-4-5"),
+        ]
+
+        self.assertEqual(
+            cost_policy.compute_stage_overrides(cfg, entries)["02"]["claude"],
+            {"model": "claude-haiku-4-5", "effort": "low"},
+        )
+
+    def test_sufficient_clean_candidate_history_still_applies_override(self):
+        cfg = self.enabled_config()
+        entries = [
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", model="claude-haiku-4-5"),
+            self.entry("02", "claude", model="claude-haiku-4-5"),
+        ]
+
+        self.assertEqual(
+            cost_policy.compute_stage_overrides(cfg, entries)["02"]["claude"],
+            {"model": "claude-haiku-4-5", "effort": "low"},
+        )
+
+    def test_sufficient_candidate_retry_rate_at_threshold_withholds_override(self):
+        cfg = self.enabled_config()
+        entries = [
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", model="claude-haiku-4-5"),
+            self.entry("02", "claude", attempt_number=2, model="claude-haiku-4-5"),
+        ]
+
+        self.assertNotIn("02", cost_policy.compute_stage_overrides(cfg, entries))
+
+    def test_sufficient_candidate_history_with_non_null_failure_withholds_override(self):
+        cfg = self.enabled_config()
+        entries = [
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", failure_class="", model="claude-haiku-4-5"),
+            self.entry("02", "claude", model="claude-haiku-4-5"),
+        ]
+
+        self.assertNotIn("02", cost_policy.compute_stage_overrides(cfg, entries))
+
+    def test_reconfigured_candidate_model_ignores_old_model_history(self):
+        cfg = self.enabled_config()
+        cfg["cost_control"]["downgrade_candidates"]["claude"]["model"] = "claude-small-new"
+        entries = [
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("02", "claude", model="claude-sonnet-4-5"),
+            self.entry("03", "claude", failure_class="timeout", model="claude-haiku-4-5"),
+            self.entry("02", "codex", attempt_number=2, model="claude-haiku-4-5"),
+        ]
+
+        self.assertEqual(
+            cost_policy.compute_stage_overrides(cfg, entries)["02"]["claude"],
+            {"model": "claude-small-new", "effort": "low"},
+        )
+
+    def test_baseline_excludes_current_candidate_model_history(self):
+        cfg = self.enabled_config()
+        entries = [
+            self.entry("02", "claude", model="claude-haiku-4-5"),
+            self.entry("02", "claude", model="claude-haiku-4-5"),
+        ]
+
+        self.assertEqual(cost_policy.compute_stage_overrides(cfg, entries), {})
+
+    def test_effort_only_candidate_remains_compatible_with_model_history(self):
+        cfg = self.enabled_config()
+        cfg["cost_control"]["downgrade_candidates"] = {"agy": {"effort": "low"}}
+        entries = [
+            self.entry("03", "agy", model="agy-baseline"),
+            self.entry("03", "agy", model="agy-other-baseline"),
         ]
 
         self.assertEqual(cost_policy.compute_stage_overrides(cfg, entries), {"03": {"agy": {"effort": "low"}}})
