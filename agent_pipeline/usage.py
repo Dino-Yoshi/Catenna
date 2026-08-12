@@ -252,3 +252,23 @@ def record_cooldown(cooldowns_path, agent, reason, reset_at, source_task, source
             os.close(lock_fd)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: quality outcomes
+# ---------------------------------------------------------------------------
+
+
+def build_outcome_entry(task, run_id, stage, agent, model, pass_number, accepted, classification):
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "task": task,
+        "run_id": run_id,
+        "stage": stage,
+        "agent": agent,
+        "model": model,
+        "pass_number": pass_number,
+        "accepted": accepted,
+        "classification": classification,
+        "recorded_at": _now_iso(),
+    }
