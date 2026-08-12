@@ -9,6 +9,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from agent_pipeline import controller
+from agent_pipeline import gates
 from agent_pipeline import prompts
 from agent_pipeline import usage
 from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION, FAILURE_CLASS_MAX_TURNS
@@ -349,7 +350,7 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(code, EXIT_BLOCKED)
             self.assertEqual(seen_paths, [controller.usage_ledger_path()])
 
-    def test_cost_control_quality_true_reads_outcome_ledger(self):
+    def test_cost_control_quality_true_without_stage4_eligible_skips_outcome_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = "cost-quality-enabled"
             task_dir = Path(tmp) / task
@@ -369,6 +370,42 @@ class ControllerReliabilityTests(unittest.TestCase):
                 },
                 "usage_ledger": {"enabled": True},
                 "roles": {"02": {"primary": "claude", "fallbacks": []}},
+                "max_gate_passes": 1,
+            }
+            seen_paths = []
+
+            original_read_entries = controller.usage.read_entries
+            original_ensure = controller.ensure_real_stage
+            controller.usage.read_entries = lambda path: seen_paths.append(path) or []
+            controller.ensure_real_stage = lambda *args, **kwargs: EXIT_BLOCKED
+            self.addCleanup(lambda: setattr(controller.usage, "read_entries", original_read_entries))
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original_ensure))
+
+            code = controller.run_real_pipeline(task_dir, task, state, cfg, allow_dirty=True)
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(seen_paths, [controller.usage_ledger_path()])
+
+    def test_cost_control_quality_true_with_stage4_eligible_reads_outcome_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "cost-quality-stage4-eligible"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            state = new_state(task, "run-test")
+            cfg = {
+                "cost_control": {
+                    "enabled": True,
+                    "quality_aware": True,
+                    "min_samples": 2,
+                    "max_retry_rate": 0.5,
+                    "max_rejection_rate": 0.5,
+                    "eligible_stages": ["04"],
+                    "downgrade_candidates": {"claude": {"effort": "low"}},
+                },
+                "usage_ledger": {"enabled": True},
+                "roles": {"04": {"primary": "claude", "fallbacks": []}},
                 "max_gate_passes": 1,
             }
             seen_paths = []
@@ -679,6 +716,113 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(entries[0]["pass_number"], 1)
             self.assertTrue(entries[0]["accepted"])
             self.assertEqual(entries[0]["classification"], "accepted")
+
+    def test_stage4_quality_outcome_logs_when_append_returns_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-quality-append-false"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            (task_dir / CONTRACTS["04"].filename).write_text(valid_artifact("04"), encoding="utf-8")
+            state = new_state(task, "run-test")
+            state.setdefault("real_stage_runs", {}).setdefault("04", []).append({
+                "agent": "claude",
+                "model": "claude-haiku-4-5",
+                "pass_number": 1,
+                "finalized": True,
+                "final_artifact_hash": controller.sha256_file(task_dir / CONTRACTS["04"].filename),
+            })
+            events = []
+            gate = {"accepted": True, "valid": True}
+
+            original_append_entry = gates.usage.append_entry
+            original_append_log = gates.append_log
+            gates.usage.append_entry = lambda *args, **kwargs: False
+            gates.append_log = lambda task_dir_arg, event: events.append(event)
+            self.addCleanup(lambda: setattr(gates.usage, "append_entry", original_append_entry))
+            self.addCleanup(lambda: setattr(gates, "append_log", original_append_log))
+
+            result = gates.record_stage4_quality_outcome(
+                task_dir,
+                state,
+                {"cost_control": {"quality_aware": True}},
+                1,
+                gate,
+                task_dir / "outcomes.jsonl",
+            )
+
+            self.assertFalse(result)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event"], "stage4_quality_outcome_write_failed")
+            self.assertEqual(events[0]["stage"], "04_gate")
+            self.assertEqual(events[0]["pass"], 1)
+            self.assertEqual(events[0]["run_id"], "run-test")
+            self.assertEqual(events[0]["reason"], "append_entry_returned_false")
+
+    def test_stage4_quality_outcome_logs_exception_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-quality-exception"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            state = new_state(task, "run-test")
+            events = []
+            gate = {"accepted": True, "valid": True}
+
+            original_producer = gates.finalized_stage4_producer
+            original_append_log = gates.append_log
+            gates.finalized_stage4_producer = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("forced failure"))
+            gates.append_log = lambda task_dir_arg, event: events.append(event)
+            self.addCleanup(lambda: setattr(gates, "finalized_stage4_producer", original_producer))
+            self.addCleanup(lambda: setattr(gates, "append_log", original_append_log))
+
+            result = gates.record_stage4_quality_outcome(
+                task_dir,
+                state,
+                {"cost_control": {"quality_aware": True}},
+                2,
+                gate,
+                task_dir / "outcomes.jsonl",
+            )
+
+            self.assertFalse(result)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event"], "stage4_quality_outcome_write_failed")
+            self.assertEqual(events[0]["stage"], "04_gate")
+            self.assertEqual(events[0]["pass"], 2)
+            self.assertEqual(events[0]["run_id"], "run-test")
+            self.assertEqual(events[0]["error"], "forced failure")
+
+    def test_stage4_quality_outcome_swallows_failure_log_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-quality-log-failure"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            (task_dir / CONTRACTS["04"].filename).write_text(valid_artifact("04"), encoding="utf-8")
+            state = new_state(task, "run-test")
+            state.setdefault("real_stage_runs", {}).setdefault("04", []).append({
+                "agent": "claude",
+                "model": "claude-haiku-4-5",
+                "pass_number": 1,
+                "finalized": True,
+                "final_artifact_hash": controller.sha256_file(task_dir / CONTRACTS["04"].filename),
+            })
+
+            original_append_entry = gates.usage.append_entry
+            original_append_log = gates.append_log
+            gates.usage.append_entry = lambda *args, **kwargs: False
+            gates.append_log = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("log failure"))
+            self.addCleanup(lambda: setattr(gates.usage, "append_entry", original_append_entry))
+            self.addCleanup(lambda: setattr(gates, "append_log", original_append_log))
+
+            result = gates.record_stage4_quality_outcome(
+                task_dir,
+                state,
+                {"cost_control": {"quality_aware": True}},
+                1,
+                {"accepted": True, "valid": True},
+                task_dir / "outcomes.jsonl",
+            )
+
+            self.assertFalse(result)
 
     def test_stage4_gate_loop_skips_outcome_when_quality_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
