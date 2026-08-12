@@ -1171,14 +1171,44 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.with_usage_root(root / "usage")
             usage.append_entry(
                 controller.usage_ledger_path(),
-                usage.build_entry("t", "r", "02", "codex", {"duration_seconds": 1.0, "failure_class": None}, {"input_tokens": 25, "cache_read_tokens": 75}),
+                usage.build_entry("t", "r", "02", "codex", {"duration_seconds": 1.0, "failure_class": None}, {"input_tokens": 25, "cache_read_tokens": 75, "total_cost_usd_estimated": 0.0001}),
             )
 
             code, output = self.capture_usage()
 
             self.assertEqual(code, EXIT_SUCCESS)
-            self.assertIn("codex: calls=1 failures=0 duration=1.0s in=25 out=0 cost=unknown cache_hit=75.0%", output)
-            self.assertIn("overall: calls=1 failures=0 duration=1.0s cache_hit=75.0%", output)
+            self.assertIn("codex: calls=1 failures=0 duration=1.0s in=25 out=0 cost=unknown cost_estimated=$0.0001 cache_hit=75.0%", output)
+            self.assertIn("overall: calls=1 failures=0 duration=1.0s cost=unknown cost_estimated=$0.0001 cache_hit=75.0%", output)
+
+    def test_pipeline_usage_prints_known_real_cost_with_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_usage_root(root / "usage")
+            usage.append_entry(
+                controller.usage_ledger_path(),
+                usage.build_entry("t", "r", "07", "claude", {"duration_seconds": 1.0, "failure_class": None}, {"input_tokens": 25, "output_tokens": 5, "total_cost_usd": 0.0001}),
+            )
+
+            code, output = self.capture_usage()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertIn("claude: calls=1 failures=0 duration=1.0s in=25 out=5 cost=$0.0001 cost_estimated=unknown", output)
+            self.assertIn("overall: calls=1 failures=0 duration=1.0s cost=$0.0001 cost_estimated=unknown", output)
+
+    def test_pipeline_usage_prints_unknown_estimated_cost_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_usage_root(root / "usage")
+            usage.append_entry(
+                controller.usage_ledger_path(),
+                usage.build_entry("t", "r", "02", "codex", {"duration_seconds": 1.0, "failure_class": None}, {"input_tokens": 25}),
+            )
+
+            code, output = self.capture_usage()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertIn("cost_estimated=unknown", output)
+            self.assertNotIn("cost_estimated=$0.0000", output)
 
     def test_pipeline_verify_reports_invalid_config_like_pipeline_run(self):
         with tempfile.TemporaryDirectory() as tmp:
