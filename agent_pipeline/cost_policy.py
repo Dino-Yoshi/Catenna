@@ -87,7 +87,7 @@ def _candidate_confirmed_safe(config, stage_key, ledger_entries, agent, candidat
 
 def _candidate_confirmed_quality_safe(config, stage_key, quality_entries, agent, candidate_model):
     cost_control = config.get("cost_control", {})
-    if not cost_control.get("enabled", False) or not cost_control.get("quality_aware", False):
+    if not cost_control.get("quality_aware", False):
         return True
     if stage_key != "04":
         return True
@@ -99,12 +99,7 @@ def _candidate_confirmed_quality_safe(config, stage_key, quality_entries, agent,
     ]
     if len(matching) < int(cost_control.get("min_samples", 1)):
         return True
-    rejected = 0
-    for entry in matching:
-        if not entry.get("accepted"):
-            rejected += 1
-    rejection_rate = float(rejected) / float(len(matching))
-    return rejection_rate < float(cost_control.get("max_rejection_rate", 0))
+    return _rate_below_threshold(matching, lambda entry: not entry.get("accepted"), cost_control.get("max_rejection_rate", 0))
 
 
 def _history_reliable(config, matching):
@@ -114,12 +109,14 @@ def _history_reliable(config, matching):
     for entry in matching:
         if entry.get("failure_class") is not None:
             return False
-    retry_count = 0
-    for entry in matching:
-        if _is_retry(entry):
-            retry_count += 1
-    retry_rate = float(retry_count) / float(len(matching))
-    return retry_rate < float(cost_control.get("max_retry_rate", 0))
+    return _rate_below_threshold(matching, _is_retry, cost_control.get("max_retry_rate", 0))
+
+
+def _rate_below_threshold(matching, is_bad, threshold):
+    if not matching:
+        return True
+    bad = sum(1 for entry in matching if is_bad(entry))
+    return (float(bad) / float(len(matching))) < float(threshold)
 
 
 def _is_retry(entry):
