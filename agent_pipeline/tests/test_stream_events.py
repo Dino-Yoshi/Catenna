@@ -81,6 +81,16 @@ CODEX_STREAM_WITH_REASONING = "\n".join(
     ]
 )
 
+CODEX_STREAM_WITH_CACHE_USAGE = "\n".join(
+    [
+        '{"type":"thread.started","thread_id":"t1"}',
+        '{"type":"turn.started"}',
+        '{"type":"item.completed","item":{"id":"item_r","type":"reasoning","text":"not usage"}}',
+        '{"type":"turn.completed","usage":{"input_tokens":25,"output_tokens":5,'
+        '"cached_input_tokens":75,"cache_write_input_tokens":10,"reasoning_output_tokens":99}}',
+    ]
+)
+
 CLAUDE_STREAM_WITH_THINKING = "\n".join(
     [
         '{"type":"system","subtype":"init","cwd":"/repo"}',
@@ -210,6 +220,14 @@ class UsageSummaryTests(unittest.TestCase):
     def test_codex_usage_extracted(self):
         usage = stream_events.usage_summary("codex", CODEX_STREAM)
         self.assertEqual(usage["input_tokens"], 10)
+
+    def test_codex_cache_usage_uses_codex_field_names(self):
+        usage = stream_events.usage_summary("codex", CODEX_STREAM_WITH_CACHE_USAGE)
+        self.assertEqual(usage["input_tokens"], 25)
+        self.assertEqual(usage["output_tokens"], 5)
+        self.assertEqual(usage["cache_read_tokens"], 75)
+        self.assertEqual(usage["cache_creation_tokens"], 10)
+        self.assertNotIn("reasoning_output_tokens", usage)
 
     def test_claude_usage_and_cost_extracted(self):
         usage = stream_events.usage_summary("claude", CLAUDE_STREAM_WITH_USAGE)
