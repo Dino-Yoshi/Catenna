@@ -67,8 +67,17 @@ class LockingTests(unittest.TestCase):
         self.assertIn("PID is not live", str(raised.exception))
         self.assertTrue(raised.exception.unlockable)
 
-    def test_explicit_unlock_archives_lock(self):
+    def test_explicit_unlock_refuses_live_lock(self):
         self.write_lock(os.getpid())
+
+        result = explicit_unlock(self.task_dir, "operator requested")
+
+        self.assertFalse(result["unlocked"])
+        self.assertIn("still live", result["message"])
+        self.assertTrue(lock_path(self.task_dir).exists())
+
+    def test_explicit_unlock_archives_stale_lock(self):
+        self.write_lock(999999999)
 
         result = explicit_unlock(self.task_dir, "operator requested")
 
