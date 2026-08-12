@@ -12,7 +12,7 @@ from agent_pipeline import controller
 from agent_pipeline import gates
 from agent_pipeline import prompts
 from agent_pipeline import usage
-from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION, FAILURE_CLASS_MAX_TURNS
+from agent_pipeline.failures import EXIT_BAD_INPUT, EXIT_BLOCKED, EXIT_SUCCESS, EXIT_VALIDATION, FAILURE_CLASS_MALFORMED_ARTIFACT, FAILURE_CLASS_MAX_TURNS
 from agent_pipeline.mock_agent import gate_artifact, valid_artifact
 from agent_pipeline.runner import atomic_finalize
 from agent_pipeline.state import CONTRACTS, load_state, new_state, reconcile_artifacts, state_path, write_state_atomic
@@ -511,6 +511,72 @@ class ControllerReliabilityTests(unittest.TestCase):
 
         self.assertIs(selected, cfg)
 
+    def test_ensure_real_stage_honors_persisted_attempt_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "attempt-budget"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            state = new_state(task, "run-test")
+            state["attempts"]["02"] = 2
+            cfg = {
+                "stage_attempt_budget": 2,
+                "roles": {"02": {"primary": "codex", "fallbacks": []}},
+                "agents": {"codex": {"enabled": True, "workspace_write": False}},
+                "cross_task_cooldowns": {"enabled": False},
+                "cost_control": {"enabled": False},
+            }
+            calls = []
+            original_invoke = controller.invoke_stage
+            controller.invoke_stage = lambda *args, **kwargs: calls.append(args) or {}
+            self.addCleanup(lambda: setattr(controller, "invoke_stage", original_invoke))
+
+            code = controller.ensure_real_stage(task_dir, state, cfg, "02", "read-only", {})
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(calls, [])
+            self.assertEqual(state["last_failure"]["reason"], "attempt budget exhausted")
+
+    def test_forced_stage_pass_uses_fresh_retry_budget_despite_cumulative_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "forced-pass-budget"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            state = new_state(task, "run-test")
+            state["attempts"]["04"] = 2
+            cfg = {
+                "stage_attempt_budget": 2,
+                "roles": {"04": {"primary": "codex", "fallbacks": []}},
+                "agents": {"codex": {"enabled": True, "workspace_write": False}},
+                "cross_task_cooldowns": {"enabled": False},
+                "cost_control": {"enabled": False},
+            }
+            calls = []
+
+            def fake_invoke(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, agent, pass_number, **kwargs):
+                calls.append(kwargs.get("attempt_number"))
+                candidate_path = task_dir_arg / ("attempt-%s.md" % kwargs.get("attempt_number"))
+                candidate_path.write_text("# malformed\n", encoding="utf-8")
+                return {
+                    "candidate_artifact_path": str(candidate_path),
+                    "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
+                    "exit_code": 1,
+                    "metadata_path": str(candidate_path) + ".json",
+                    "_source_before": "",
+                }
+
+            original_invoke = controller.invoke_stage
+            original_source_snapshot = controller.source_snapshot
+            controller.invoke_stage = fake_invoke
+            controller.source_snapshot = lambda: ""
+            self.addCleanup(lambda: setattr(controller, "invoke_stage", original_invoke))
+            self.addCleanup(lambda: setattr(controller, "source_snapshot", original_source_snapshot))
+
+            code = controller.ensure_real_stage(task_dir, state, cfg, "04", "read-only", {}, pass_number=2, force=True)
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(calls, [3, 4])
+            self.assertEqual(state["last_failure"]["stage"], "04")
+
     def test_merge_matching_stage_override_ignored_when_cost_control_disabled(self):
         state = new_state("task", "run-test")
         state["stage_overrides"] = {"02": {"codex": {"model": "cheap-codex"}}}
@@ -627,6 +693,47 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertIn("Latest Stage 04 gate rejection feedback:", calls[0][3])
             self.assertIn("ready_for_implementation: false", calls[0][3])
             self.assertEqual(calls[1], ("04_gate", 2, True, None))
+
+    def test_stage4_gate_loop_uses_persisted_rejection_hash_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-identical-resume"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01", "02", "03"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            brief = valid_artifact("04")
+            audit = gate_artifact(
+                "04_gate",
+                "ready_for_implementation: false\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []",
+            )
+            (task_dir / CONTRACTS["04"].filename).write_text(brief, encoding="utf-8")
+            (task_dir / CONTRACTS["04_gate"].filename).write_text(audit, encoding="utf-8")
+            state = new_state(task, "run-test")
+            state["stage_gate_passes"] = [{"pass": 1, "accepted": False}]
+            state["stage4_previous_rejection"] = {
+                "brief_hash": controller.sha256_file(task_dir / CONTRACTS["04"].filename),
+                "audit_hash": controller.sha256_file(task_dir / CONTRACTS["04_gate"].filename),
+            }
+            calls = []
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
+                calls.append(stage_key)
+                if stage_key == "04":
+                    (task_dir_arg / CONTRACTS["04"].filename).write_text(brief, encoding="utf-8")
+                    return EXIT_SUCCESS
+                if stage_key == "04_gate":
+                    self.fail("04_gate should not run for an identical resumed rejection")
+                return EXIT_SUCCESS
+
+            original = controller.ensure_real_stage
+            controller.ensure_real_stage = fake_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original))
+
+            code = controller.run_stage4_gate_loop(task_dir, state, {"max_gate_passes": 2}, {})
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(calls, ["04"])
+            self.assertEqual(state["last_failure"]["failure_class"], "gate_rejected")
 
     def test_stage4_gate_loop_pass1_force_still_tracks_completed_stages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1115,6 +1222,7 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             def fake_run_verification(*args, **kwargs):
                 seen["driven_project_commands"] = kwargs.get("driven_project_commands")
+                seen["allow_pid"] = kwargs.get("allow_pid")
                 return {
                     "overall_status": "passed",
                     "checks": [],
@@ -1134,6 +1242,7 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS, output)
             self.assertIs(seen["driven_project_commands"], driven_commands)
+            self.assertEqual(seen["allow_pid"], os.getpid())
             self.assertIn("driven_project_verified: true (all configured driven-project commands passed)", output)
 
     def test_pipeline_verify_passes_verification_toggles(self):
@@ -1164,6 +1273,26 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(code, EXIT_SUCCESS, output)
             self.assertTrue(seen["skip_self_check"])
             self.assertTrue(seen["build_implies_compile"])
+            self.assertEqual(seen["allow_pid"], os.getpid())
+
+    def test_pipeline_verify_refuses_existing_live_task_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+            task_dir = root / "verify-locked"
+            (task_dir / ".orchestrator").mkdir(parents=True)
+            (task_dir / ".orchestrator" / "lock.json").write_text(
+                '{"pid": %d, "host": "%s", "command": "run", "run_id": "other"}\n' % (os.getpid(), controller.socket.gethostname()),
+                encoding="utf-8",
+            )
+            original_load_config = controller.load_config
+            controller.load_config = lambda: {"verification": {"driven_project_commands": []}}
+            self.addCleanup(lambda: setattr(controller, "load_config", original_load_config))
+
+            code, output = self.capture_verify("verify-locked")
+
+            self.assertEqual(code, controller.EXIT_LOCKED)
+            self.assertIn("lock is active", output)
 
     def test_pipeline_usage_prints_cache_hit_for_groups_and_overall(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1178,7 +1307,7 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS)
             self.assertIn("codex: calls=1 failures=0 duration=1.0s in=25 out=0 cost=unknown cost_estimated=$0.0001 cache_hit=75.0%", output)
-            self.assertIn("overall: calls=1 failures=0 duration=1.0s cost=unknown cost_estimated=$0.0001 cache_hit=75.0%", output)
+            self.assertIn("overall: calls=1 failures=0 duration=1.0s in=25 out=0 cost=unknown cost_estimated=$0.0001 cache_hit=75.0%", output)
 
     def test_pipeline_usage_prints_known_real_cost_with_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1193,7 +1322,7 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS)
             self.assertIn("claude: calls=1 failures=0 duration=1.0s in=25 out=5 cost=$0.0001 cost_estimated=unknown", output)
-            self.assertIn("overall: calls=1 failures=0 duration=1.0s cost=$0.0001 cost_estimated=unknown", output)
+            self.assertIn("overall: calls=1 failures=0 duration=1.0s in=25 out=5 cost=$0.0001 cost_estimated=unknown", output)
 
     def test_pipeline_usage_prints_unknown_estimated_cost_label(self):
         with tempfile.TemporaryDirectory() as tmp:
