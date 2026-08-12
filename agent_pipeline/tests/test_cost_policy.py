@@ -237,6 +237,23 @@ class CostPolicyTests(unittest.TestCase):
 
         self.assertNotIn("04", cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries))
 
+    def test_quality_aware_missing_accepted_counts_as_rejection(self):
+        cfg = self.enabled_config()
+        cfg["cost_control"]["quality_aware"] = True
+        cfg["cost_control"]["max_rejection_rate"] = 0.51
+        entries = [
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+        ]
+        missing_accepted = self.outcome(accepted=True)
+        del missing_accepted["accepted"]
+        quality_entries = [self.outcome(accepted=True), missing_accepted]
+
+        self.assertIn("04", cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries))
+
+        cfg["cost_control"]["max_rejection_rate"] = 0.5
+        self.assertNotIn("04", cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries))
+
     def test_quality_history_below_min_samples_defers_to_existing_behavior(self):
         cfg = self.enabled_config()
         cfg["cost_control"]["quality_aware"] = True
