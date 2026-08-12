@@ -7,6 +7,8 @@ import os
 import re
 from pathlib import Path
 
+from .cost_policy import ALLOWED_STAGES
+
 try:
     from collections.abc import Mapping
 except ImportError:  # pragma: no cover - Python 2 compatibility fallback.
@@ -258,6 +260,8 @@ def validate_cost_control_config(config):
     for stage in eligible_stages:
         if stage not in roles:
             raise ConfigError("cost_control eligible stage %s is not configured in roles" % stage)
+        if stage not in ALLOWED_STAGES:
+            raise ConfigError("cost_control eligible stage %s is not supported" % stage)
     candidates = cost_control.get("downgrade_candidates")
     if not isinstance(candidates, Mapping):
         raise ConfigError("cost_control.downgrade_candidates must be a mapping")
