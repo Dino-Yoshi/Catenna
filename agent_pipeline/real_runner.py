@@ -141,6 +141,15 @@ def invoke_agent(
 
     extracted_path = extract_candidate(candidate_path, stdout_text, agent, events=events)
     usage_data = stream_events.usage_summary(agent, stdout_text, events=events)
+    if isinstance(usage_data, dict):
+        if agent == "codex":
+            usage_data["total_cost_usd_estimated"] = usage_module.estimate_cost_usd(
+                usage_data,
+                detail.get("model"),
+                config.get("pricing", {}).get("codex", {}),
+            )
+        else:
+            usage_data["total_cost_usd_estimated"] = None
     reasoning_text = stream_events.reasoning_summary(agent, stdout_text, events=events)
     reasoning_path = None
     if reasoning_text and capture_reasoning:
