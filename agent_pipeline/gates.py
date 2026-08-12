@@ -62,7 +62,8 @@ def run_stage4_gate_loop(task_dir, state, config, assignments, ensure_real_stage
         gate = accepted_stage4_gate(task_dir)
         record_gate_pass(task_dir, state, pass_number, gate)
         append_log(task_dir, {"event": "stage4_gate_decision", "stage": "04_gate", "pass": pass_number, "accepted": bool(gate.get("accepted")), "valid": bool(gate.get("valid")), "classification": gate_classification(gate), "run_id": state.get("run_id")})
-        record_stage4_quality_outcome(task_dir, state, config, pass_number, gate, outcome_ledger_path)
+        if gate.get("valid"):
+            record_stage4_quality_outcome(task_dir, state, config, pass_number, gate, outcome_ledger_path)
         if gate["accepted"]:
             return EXIT_SUCCESS
         if not gate.get("valid"):
@@ -162,6 +163,8 @@ def record_stage4_quality_outcome(task_dir, state, config, pass_number, gate, ou
         if not config.get("cost_control", {}).get("quality_aware", False):
             return False
         agent, model = finalized_stage4_producer(task_dir, state, pass_number)
+        if model is None:
+            return False
         entry = usage.build_outcome_entry(
             state.get("task"),
             state.get("run_id"),
