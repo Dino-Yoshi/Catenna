@@ -5,6 +5,7 @@ from __future__ import print_function
 import shutil
 import time
 
+from . import usage
 from .artifacts import CONTRACTS, parse_gate, sha256_file, validate_file
 from .failures import (
     EXIT_BLOCKED,
@@ -16,7 +17,7 @@ from .failures import (
 from .state import append_log, reconcile_artifacts
 
 
-def run_stage4_gate_loop(task_dir, state, config, assignments, ensure_real_stage, block_transition):
+def run_stage4_gate_loop(task_dir, state, config, assignments, ensure_real_stage, block_transition, outcome_ledger_path=None):
     if "04_gate" in state.get("completed_stages", []) and accepted_stage4_gate(task_dir)["accepted"]:
         return EXIT_SUCCESS
     max_passes = int(config.get("max_gate_passes", 2))
@@ -61,6 +62,7 @@ def run_stage4_gate_loop(task_dir, state, config, assignments, ensure_real_stage
         gate = accepted_stage4_gate(task_dir)
         record_gate_pass(task_dir, state, pass_number, gate)
         append_log(task_dir, {"event": "stage4_gate_decision", "stage": "04_gate", "pass": pass_number, "accepted": bool(gate.get("accepted")), "valid": bool(gate.get("valid")), "classification": gate_classification(gate), "run_id": state.get("run_id")})
+        record_stage4_quality_outcome(task_dir, state, config, pass_number, gate, outcome_ledger_path)
         if gate["accepted"]:
             return EXIT_SUCCESS
         if not gate.get("valid"):
@@ -151,6 +153,51 @@ def gate_classification(gate):
     if gate.get("accepted"):
         return "accepted"
     return FAILURE_CLASS_GATE_REJECTED
+
+
+def record_stage4_quality_outcome(task_dir, state, config, pass_number, gate, outcome_ledger_path=None):
+    try:
+        if not outcome_ledger_path:
+            return False
+        if not config.get("cost_control", {}).get("quality_aware", False):
+            return False
+        agent, model = finalized_stage4_producer(task_dir, state, pass_number)
+        entry = usage.build_outcome_entry(
+            state.get("task"),
+            state.get("run_id"),
+            "04",
+            agent,
+            model,
+            pass_number,
+            bool(gate.get("accepted")),
+            gate_classification(gate),
+        )
+        return usage.append_entry(outcome_ledger_path, entry)
+    except Exception:
+        return False
+
+
+def finalized_stage4_producer(task_dir, state, pass_number):
+    runs = state.get("real_stage_runs", {}).get("04") or []
+    finalized = [
+        run for run in runs
+        if run.get("pass_number") == pass_number and run.get("finalized") is True
+    ]
+    if not finalized:
+        return None, None
+    brief_path = task_dir / CONTRACTS["04"].filename
+    brief_hash = None
+    try:
+        if brief_path.exists():
+            brief_hash = sha256_file(brief_path)
+    except Exception:
+        brief_hash = None
+    if brief_hash:
+        for run in reversed(finalized):
+            if run.get("final_artifact_hash") == brief_hash:
+                return run.get("agent"), run.get("model")
+    selected = finalized[-1]
+    return selected.get("agent"), selected.get("model")
 
 
 def now():
