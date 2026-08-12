@@ -100,6 +100,12 @@ def explicit_unlock(task_dir, reason):
             data = json.load(handle)
     except Exception:
         data = {"unreadable": True}
+    if data.get("host") == socket.gethostname():
+        live = pid_live(data.get("pid"))
+        if live is True:
+            return {"unlocked": False, "message": "lock holder PID is still live; refusing to unlock active lock"}
+        if live is None:
+            return {"unlocked": False, "message": "lock holder PID liveness is uncertain; refusing to unlock"}
     archive = orchestrator_dir(task_dir) / "runs"
     archive.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())

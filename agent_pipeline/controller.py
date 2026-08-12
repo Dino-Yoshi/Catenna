@@ -311,15 +311,21 @@ def pipeline_verify(task, run_build=False):
         print("invalid real-run config: %s" % exc)
         return EXIT_VALIDATION
     try:
-        report = verification.run_verification(
-            task_dir,
-            REPO_ROOT,
-            run_build=run_build,
-            driven_project_commands=config.get("verification", {}).get("driven_project_commands", []),
-            skip_self_check=config.get("verification", {}).get("skip_self_check", False),
-            build_implies_compile=config.get("verification", {}).get("build_implies_compile", False),
-        )
+        run_id = str(uuid.uuid4())
+        with TaskLock(task_dir, "verify", run_id):
+            report = verification.run_verification(
+                task_dir,
+                REPO_ROOT,
+                run_build=run_build,
+                allow_pid=os.getpid(),
+                driven_project_commands=config.get("verification", {}).get("driven_project_commands", []),
+                skip_self_check=config.get("verification", {}).get("skip_self_check", False),
+                build_implies_compile=config.get("verification", {}).get("build_implies_compile", False),
+            )
     except verification.VerificationError as exc:
+        print(str(exc))
+        return EXIT_LOCKED
+    except LockError as exc:
         print(str(exc))
         return EXIT_LOCKED
     def pass_fail_color(status_value):
@@ -418,7 +424,8 @@ def pipeline_usage(task=None, agent=None, since_hours=None):
         estimated_cost = format_estimated_cost(bucket)
         print("  %s: calls=%d failures=%d duration=%.1fs %s %s %s %s" % (name, bucket["count"], bucket["failures"], bucket["duration_seconds"], tokens, cost, estimated_cost, format_cache_hit(bucket)))
     overall = summary["overall"]
-    print("overall: calls=%d failures=%d duration=%.1fs %s %s %s" % (overall["count"], overall["failures"], overall["duration_seconds"], format_cost(overall), format_estimated_cost(overall), format_cache_hit(overall)))
+    overall_tokens = "in=%d out=%d" % (overall["input_tokens"], overall["output_tokens"]) if overall["tokens_known"] else "tokens=unknown"
+    print("overall: calls=%d failures=%d duration=%.1fs %s %s %s %s" % (overall["count"], overall["failures"], overall["duration_seconds"], overall_tokens, format_cost(overall), format_estimated_cost(overall), format_cache_hit(overall)))
     try:
         cooldowns = usage.load_cooldowns(cooldown_store_path())
         if cooldowns:
@@ -738,6 +745,7 @@ def merge_stage_override_into_config(config, stage_key, override):
 def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
     pending = state.get("pending_approval") or {}
     awaiting_retry_approval = state.get("state") == "awaiting_retry_approval"
+    approved_retry_dispatch = False
     completed = stage_key in state.get("completed_stages", [])
     if not awaiting_retry_approval:
         if not force and completed:
@@ -757,11 +765,15 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
         consume_approved_retry_if_present(state, stage_key)
         append_log(task_dir, {"event": "approval_consumed", "stage": stage_key, "run_id": state.get("run_id")})
         state["state"] = "running"
+        approved_retry_dispatch = True
     attempt_budget = int(config.get("stage_attempt_budget", 2))
-    attempts = 0
+    if force or approved_retry_dispatch:
+        attempts_used = 0
+    else:
+        attempts_used = int(state.setdefault("attempts", {}).get(stage_key, 0))
     next_attempt_kind = "normal"
     next_retry_reason = "initial/no-retry"
-    while attempts < attempt_budget:
+    while attempts_used < attempt_budget:
         route = choose_real_agent(stage_key, state, config, assignments, execution_mode)
         if not route:
             block_transition(task_dir, state, stage_key, "no configured capable runner exists for required role/mode", FAILURE_CLASS_SOURCE_FAILURE)
@@ -781,8 +793,8 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             state.setdefault("fallback_events", []).append(event)
             state.setdefault("fallback_history", []).append(event)
             append_log(task_dir, {"event": "provider_fallback_selected", "stage": stage_key, "provider": agent, "classification": event["reason"], "run_id": state["run_id"]})
-        attempts += 1
         attempt_number = increment_attempt(state, stage_key)
+        attempts_used += 1
         increment_agent_count(state, agent)
         append_log(task_dir, {"event": "stage_dispatch", "stage": stage_key, "pass": pass_number, "attempt": attempt_number, "provider": agent, "attempt_kind": next_attempt_kind, "retry_reason": next_retry_reason, "run_id": state.get("run_id")})
         result = invoke_stage(task_dir, state, dispatch_config, stage_key, execution_mode, agent, pass_number, attempt_number=attempt_number, attempt_kind=next_attempt_kind, retry_reason=next_retry_reason, extra_context=extra_context)
@@ -873,10 +885,10 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
                 failed_attempt_number=result.get("attempt_number"),
             )
             return EXIT_BLOCKED
-        if failure_class in (FAILURE_CLASS_MALFORMED_ARTIFACT, FAILURE_CLASS_EMPTY_OUTPUT, FAILURE_CLASS_TIMEOUT) and attempts < attempt_budget:
+        if failure_class in (FAILURE_CLASS_MALFORMED_ARTIFACT, FAILURE_CLASS_EMPTY_OUTPUT, FAILURE_CLASS_TIMEOUT) and attempts_used < attempt_budget:
             next_attempt_kind = "transient_retry"
             next_retry_reason = "transient timeout" if failure_class == FAILURE_CLASS_TIMEOUT else "malformed output"
-            append_log(task_dir, {"event": "retry_scheduled", "stage": stage_key, "pass": pass_number, "attempt": attempts + 1, "provider": agent, "classification": failure_class, "retry_reason": next_retry_reason, "run_id": state.get("run_id")})
+            append_log(task_dir, {"event": "retry_scheduled", "stage": stage_key, "pass": pass_number, "attempt": attempt_number + 1, "provider": agent, "classification": failure_class, "retry_reason": next_retry_reason, "run_id": state.get("run_id")})
             continue
         if failure_class == FAILURE_CLASS_RATE_LIMIT:
             block_transition(task_dir, state, stage_key, "rate limit without credible reset time", failure_class)

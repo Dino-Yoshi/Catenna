@@ -164,7 +164,7 @@ def _accumulate(bucket, entry):
             bucket[field] += value
             bucket["tokens_known"] = True
     cost = usage.get("total_cost_usd")
-    if isinstance(cost, (int, float)):
+    if not isinstance(cost, bool) and isinstance(cost, (int, float)):
         bucket["total_cost_usd"] += cost
         bucket["cost_known"] = True
     estimated_cost = usage.get("total_cost_usd_estimated")

@@ -150,6 +150,12 @@ class LedgerTests(unittest.TestCase):
         self.assertTrue(codex["cost_known"])
         self.assertAlmostEqual(summary["overall"]["total_cost_usd_estimated"], 0.02)
 
+    def test_summarize_ignores_boolean_real_cost(self):
+        summary = usage.summarize([{"agent": "codex", "usage": {"total_cost_usd": True}}])
+
+        self.assertFalse(summary["overall"]["cost_known"])
+        self.assertEqual(summary["overall"]["total_cost_usd"], 0.0)
+
     def test_summarize_historical_entries_without_estimated_cost_are_unknown(self):
         summary = usage.summarize([{"agent": "codex", "usage": {"input_tokens": 10, "total_cost_usd": 0.01}}])
 

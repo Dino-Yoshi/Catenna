@@ -231,6 +231,13 @@ class ReasoningCaptureConfigTests(unittest.TestCase):
             config.validate_config(bad)
         self.assertIn("missing", str(raised.exception))
 
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["cost_control"]["eligible_stages"] = ["02", "05"]
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("05", str(raised.exception))
+        self.assertIn("not supported", str(raised.exception))
+
     def test_cost_control_candidates_allow_null_empty_and_partial_mappings(self):
         cfg = config.deep_copy(config.DEFAULT_CONFIG)
         cfg["cost_control"]["downgrade_candidates"] = {
