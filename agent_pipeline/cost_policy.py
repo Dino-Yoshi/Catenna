@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover - Python 2 compatibility fallback.
 ALLOWED_STAGES = set(["02", "03", "04", "04_gate", "07"])
 
 
-def compute_stage_overrides(config, ledger_entries, assignments=None):
+def compute_stage_overrides(config, ledger_entries, assignments=None, quality_entries=None):
     """Return {stage: {agent: {model/effort}}} for reliable candidates.
 
     ``assignments`` is accepted for compatibility with earlier sketches, but
@@ -21,6 +21,7 @@ def compute_stage_overrides(config, ledger_entries, assignments=None):
     cost_control = config.get("cost_control", {})
     if not cost_control.get("enabled", False):
         return {}
+    quality_entries = quality_entries or []
     roles = config.get("roles", {})
     candidates = cost_control.get("downgrade_candidates") or {}
     if not isinstance(candidates, Mapping):
@@ -41,6 +42,7 @@ def compute_stage_overrides(config, ledger_entries, assignments=None):
             if (
                 _stage_eligible(config, stage_key, ledger_entries, agent, candidate_model)
                 and _candidate_confirmed_safe(config, stage_key, ledger_entries, agent, candidate_model)
+                and _candidate_confirmed_quality_safe(config, stage_key, quality_entries, agent, candidate_model)
             ):
                 stage_overrides[agent] = effective
         if stage_overrides:
@@ -81,6 +83,28 @@ def _candidate_confirmed_safe(config, stage_key, ledger_entries, agent, candidat
     if len(matching) < int(cost_control.get("min_samples", 1)):
         return True
     return _history_reliable(config, matching)
+
+
+def _candidate_confirmed_quality_safe(config, stage_key, quality_entries, agent, candidate_model):
+    cost_control = config.get("cost_control", {})
+    if not cost_control.get("enabled", False) or not cost_control.get("quality_aware", False):
+        return True
+    if stage_key != "04":
+        return True
+    matching = [
+        entry for entry in quality_entries
+        if entry.get("stage") == "04"
+        and entry.get("agent") == agent
+        and entry.get("model") == candidate_model
+    ]
+    if len(matching) < int(cost_control.get("min_samples", 1)):
+        return True
+    rejected = 0
+    for entry in matching:
+        if not entry.get("accepted"):
+            rejected += 1
+    rejection_rate = float(rejected) / float(len(matching))
+    return rejection_rate < float(cost_control.get("max_rejection_rate", 0))
 
 
 def _history_reliable(config, matching):
