@@ -78,6 +78,10 @@ def outcomes_ledger_path():
     return USAGE_ROOT / "outcomes.jsonl"
 
 
+def usage_ledger_enabled(config):
+    return config.get("usage_ledger", {}).get("enabled", True)
+
+
 def cooldown_store_path():
     return USAGE_ROOT / "agent_cooldowns.json"
 
@@ -552,12 +556,17 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
     reconcile_artifacts(task_dir, state, read_only=False)
     cost_control = config.get("cost_control", {})
     if cost_control.get("enabled", False):
-        if config.get("usage_ledger", {}).get("enabled", True):
+        ledger_enabled = usage_ledger_enabled(config)
+        if ledger_enabled:
             ledger_entries = usage.read_entries(usage_ledger_path())
         else:
             ledger_entries = []
         quality_entries = []
-        if cost_control.get("quality_aware", False) and config.get("usage_ledger", {}).get("enabled", True):
+        if (
+            cost_control.get("quality_aware", False)
+            and ledger_enabled
+            and "04" in cost_control.get("eligible_stages", [])
+        ):
             quality_entries = usage.read_entries(outcomes_ledger_path())
         overrides = cost_policy.compute_stage_overrides(config, ledger_entries, quality_entries=quality_entries)
         state["stage_overrides"] = overrides
@@ -678,7 +687,7 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
 
 def run_stage4_gate_loop(task_dir, state, config, assignments):
     outcome_path = None
-    if config.get("usage_ledger", {}).get("enabled", True):
+    if usage_ledger_enabled(config):
         outcome_path = outcomes_ledger_path()
     return gates_module.run_stage4_gate_loop(
         task_dir,
@@ -883,7 +892,7 @@ def invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass
     safe_agent = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in str(agent))
     candidate_path = orchestrator_dir(task_dir) / "runs" / ("%s-pass-%s-attempt-%s-%s-%s.candidate.md" % (stage_key, pass_number, attempt_number, safe_agent, state["run_id"]))
     before = source_snapshot() if execution_mode == "read-only" else None
-    ledger_path = usage_ledger_path() if config.get("usage_ledger", {}).get("enabled", True) else None
+    ledger_path = usage_ledger_path() if usage_ledger_enabled(config) else None
     capture_reasoning = config.get("reasoning_capture", {}).get("enabled", True)
     result = invoke_agent(
         task_dir, config, agent, stage_key, execution_mode, prompt_path, candidate_path, state["run_id"],
