@@ -79,11 +79,13 @@ def check_concurrency_guard(task_dir, allow_pid=None):
     live process -- a workspace-write stage (Stage 5) may be mid-edit, and
     a build/test run against the same working tree would race it.
 
-    `allow_pid` lets the controller call this from inside its own
-    already-locked pipeline-run (Stage 5 has already finished by the time
-    Phase 3 calls verification, so there is no race with itself) without
-    weakening the guard for the standalone `pipeline-verify` CLI path, which
-    always passes allow_pid=None."""
+    `allow_pid` lets a caller that already holds this task's own lock
+    exempt itself without weakening the guard against any other live
+    holder. Both callers pass their own pid: `pipeline_run`'s Stage 6
+    auto-verify (Stage 5 has already finished by the time Phase 3 calls
+    verification, so there is no race with itself), and the standalone
+    `pipeline-verify` CLI path, which wraps itself in its own `TaskLock`
+    before calling this and must exempt that same lock."""
     path = lock_path(task_dir)
     if not path.exists():
         return
