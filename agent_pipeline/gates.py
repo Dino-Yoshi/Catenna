@@ -157,6 +157,22 @@ def gate_classification(gate):
 
 
 def record_stage4_quality_outcome(task_dir, state, config, pass_number, gate, outcome_ledger_path=None):
+    def log_write_failed(reason=None, error=None):
+        event = {
+            "event": "stage4_quality_outcome_write_failed",
+            "stage": "04_gate",
+            "pass": pass_number,
+            "run_id": state.get("run_id"),
+        }
+        if reason is not None:
+            event["reason"] = reason
+        if error is not None:
+            event["error"] = error
+        try:
+            append_log(task_dir, event)
+        except Exception:
+            pass
+
     try:
         if not outcome_ledger_path:
             return False
@@ -175,8 +191,13 @@ def record_stage4_quality_outcome(task_dir, state, config, pass_number, gate, ou
             bool(gate.get("accepted")),
             gate_classification(gate),
         )
-        return usage.append_entry(outcome_ledger_path, entry)
-    except Exception:
+        written = usage.append_entry(outcome_ledger_path, entry)
+        if not written:
+            log_write_failed(reason="append_entry_returned_false")
+            return False
+        return True
+    except Exception as exc:
+        log_write_failed(error=str(exc))
         return False
 
 
