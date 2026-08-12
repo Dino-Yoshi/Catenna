@@ -314,6 +314,77 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(state["stage_overrides"], {})
             self.assertEqual([event for event in events if event.get("event") == "cost_policy_applied"][0]["overrides"], {})
 
+    def test_cost_control_quality_false_does_not_read_outcome_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "cost-quality-disabled"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            state = new_state(task, "run-test")
+            cfg = {
+                "cost_control": {
+                    "enabled": True,
+                    "quality_aware": False,
+                    "min_samples": 2,
+                    "max_retry_rate": 0.5,
+                    "eligible_stages": ["02"],
+                    "downgrade_candidates": {"claude": {"effort": "low"}},
+                },
+                "usage_ledger": {"enabled": True},
+                "roles": {"02": {"primary": "claude", "fallbacks": []}},
+                "max_gate_passes": 1,
+            }
+            seen_paths = []
+
+            original_read_entries = controller.usage.read_entries
+            original_ensure = controller.ensure_real_stage
+            controller.usage.read_entries = lambda path: seen_paths.append(path) or []
+            controller.ensure_real_stage = lambda *args, **kwargs: EXIT_BLOCKED
+            self.addCleanup(lambda: setattr(controller.usage, "read_entries", original_read_entries))
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original_ensure))
+
+            code = controller.run_real_pipeline(task_dir, task, state, cfg, allow_dirty=True)
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(seen_paths, [controller.usage_ledger_path()])
+
+    def test_cost_control_quality_true_reads_outcome_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "cost-quality-enabled"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            state = new_state(task, "run-test")
+            cfg = {
+                "cost_control": {
+                    "enabled": True,
+                    "quality_aware": True,
+                    "min_samples": 2,
+                    "max_retry_rate": 0.5,
+                    "max_rejection_rate": 0.5,
+                    "eligible_stages": ["02"],
+                    "downgrade_candidates": {"claude": {"effort": "low"}},
+                },
+                "usage_ledger": {"enabled": True},
+                "roles": {"02": {"primary": "claude", "fallbacks": []}},
+                "max_gate_passes": 1,
+            }
+            seen_paths = []
+
+            original_read_entries = controller.usage.read_entries
+            original_ensure = controller.ensure_real_stage
+            controller.usage.read_entries = lambda path: seen_paths.append(path) or []
+            controller.ensure_real_stage = lambda *args, **kwargs: EXIT_BLOCKED
+            self.addCleanup(lambda: setattr(controller.usage, "read_entries", original_read_entries))
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original_ensure))
+
+            code = controller.run_real_pipeline(task_dir, task, state, cfg, allow_dirty=True)
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(seen_paths, [controller.usage_ledger_path(), controller.outcomes_ledger_path()])
+
     def test_merge_stage_override_returns_fresh_config_without_mutating_original(self):
         original = {
             "roles": {
@@ -550,6 +621,97 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_BLOCKED)
             self.assertEqual(calls, [("04", 1, False, None), ("04_gate", 1, False, None)])
+
+    def test_stage4_gate_loop_records_outcome_for_finalized_stage4_producer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-quality-outcome"
+            root = Path(tmp)
+            task_dir = root / task
+            task_dir.mkdir(parents=True)
+            self.with_usage_root(root / "usage")
+            state = new_state(task, "run-test")
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
+                if stage_key == "04":
+                    (task_dir_arg / CONTRACTS["04"].filename).write_text(valid_artifact("04"), encoding="utf-8")
+                    state_arg.setdefault("real_stage_runs", {}).setdefault("04", []).append({
+                        "agent": "codex",
+                        "model": "wrong-first-model",
+                        "pass_number": pass_number,
+                        "finalized": False,
+                    })
+                    state_arg.setdefault("real_stage_runs", {}).setdefault("04", []).append({
+                        "agent": "claude",
+                        "model": "claude-haiku-4-5",
+                        "pass_number": pass_number,
+                        "finalized": True,
+                        "final_artifact_hash": controller.sha256_file(task_dir_arg / CONTRACTS["04"].filename),
+                    })
+                if stage_key == "04_gate":
+                    (task_dir_arg / CONTRACTS["04_gate"].filename).write_text(
+                        gate_artifact(
+                            "04_gate",
+                            "ready_for_implementation: true\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []",
+                        ),
+                        encoding="utf-8",
+                    )
+                return EXIT_SUCCESS
+
+            original = controller.ensure_real_stage
+            controller.ensure_real_stage = fake_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original))
+
+            code = controller.run_stage4_gate_loop(
+                task_dir,
+                state,
+                {"max_gate_passes": 1, "usage_ledger": {"enabled": True}, "cost_control": {"quality_aware": True}},
+                {},
+            )
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            entries = usage.read_entries(controller.outcomes_ledger_path())
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["task"], task)
+            self.assertEqual(entries[0]["run_id"], "run-test")
+            self.assertEqual(entries[0]["stage"], "04")
+            self.assertEqual(entries[0]["agent"], "claude")
+            self.assertEqual(entries[0]["model"], "claude-haiku-4-5")
+            self.assertEqual(entries[0]["pass_number"], 1)
+            self.assertTrue(entries[0]["accepted"])
+            self.assertEqual(entries[0]["classification"], "accepted")
+
+    def test_stage4_gate_loop_skips_outcome_when_quality_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-quality-disabled"
+            root = Path(tmp)
+            task_dir = root / task
+            task_dir.mkdir(parents=True)
+            self.with_usage_root(root / "usage")
+            state = new_state(task, "run-test")
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
+                (task_dir_arg / CONTRACTS[stage_key].filename).write_text(
+                    gate_artifact(
+                        stage_key,
+                        "ready_for_implementation: true\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []",
+                    ) if stage_key == "04_gate" else valid_artifact(stage_key),
+                    encoding="utf-8",
+                )
+                return EXIT_SUCCESS
+
+            original = controller.ensure_real_stage
+            controller.ensure_real_stage = fake_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original))
+
+            code = controller.run_stage4_gate_loop(
+                task_dir,
+                state,
+                {"max_gate_passes": 1, "usage_ledger": {"enabled": True}, "cost_control": {"quality_aware": False}},
+                {},
+            )
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertFalse(controller.outcomes_ledger_path().exists())
 
     def test_stage4_gate_loop_archives_brief_before_identical_revision_block(self):
         with tempfile.TemporaryDirectory() as tmp:
