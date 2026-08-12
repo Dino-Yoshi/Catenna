@@ -354,7 +354,7 @@ class TailTests(unittest.TestCase):
         lines = []
         result = tail.follow(self.task_dir, poll_interval=0.01, print_fn=lines.append, max_wait_seconds=1)
 
-        self.assertEqual(result, "complete")
+        self.assertEqual(result, "blocked")
         joined = "\n".join(lines)
         self.assertIn("pipeline state unreadable:", joined)
 

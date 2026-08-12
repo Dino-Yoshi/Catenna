@@ -186,7 +186,7 @@ def _advance_or_stop(task_dir, current_path, print_fn, poll_interval, max_wait_s
             state.reconcile_artifacts(task_dir, state_obj, read_only=True)
         except CorruptState as exc:
             print_fn("pipeline state unreadable: %s" % exc)
-            return "stop", "complete", 0.0
+            return "stop", "blocked", 0.0
         state_name = state_obj.get("state")
         if state_name in ("complete", "failed", "blocked"):
             print_fn("pipeline finished: state=%s" % state_name)
