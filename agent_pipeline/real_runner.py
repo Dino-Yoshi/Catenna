@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import json
 import os
+import errno
 import signal
 import shutil
 import socket
@@ -126,8 +127,12 @@ def invoke_agent(
     except OSError as exc:
         stdout_path.write_text("", encoding="utf-8")
         stderr_path.write_text(str(exc) + "\n", encoding="utf-8")
-        exit_code = 126
-        failure_class = FAILURE_CLASS_PERMISSION_ERROR
+        if getattr(exc, "errno", None) in (errno.EACCES, errno.EPERM):
+            exit_code = 126
+            failure_class = FAILURE_CLASS_PERMISSION_ERROR
+        else:
+            exit_code = 127
+            failure_class = FAILURE_CLASS_SOURCE_FAILURE
 
     ended = now()
     duration = time.time() - started_monotonic

@@ -351,16 +351,28 @@ class StreamingRunnerTests(unittest.TestCase):
         candidate_path = self.task_dir / "04-pass-1-attempt-1-codex-run-prompt.candidate.md"
         result = invoke_agent(self.task_dir, config, "codex", "04", "read-only", missing_prompt, candidate_path, "run-prompt")
 
-        self.assertEqual(result["failure_class"], "permission_error")
+        self.assertEqual(result["failure_class"], "source_failure")
         self.assertFalse(result["real_process_invoked"])
 
-    def test_popen_oserror_reports_not_invoked(self):
+    def test_popen_oserror_reports_source_failure_not_invoked(self):
         fake = self.write_fake("print('should not run')\n")
         config = self.base_config("claude", fake)
         candidate_path = self.task_dir / "04-pass-1-attempt-1-claude-run-oserror.candidate.md"
 
         with mock.patch.object(real_runner.subprocess, "Popen", side_effect=OSError("launch failed")):
             result = invoke_agent(self.task_dir, config, "claude", "04", "read-only", self.prompt_path, candidate_path, "run-oserror")
+
+        self.assertEqual(result["failure_class"], "source_failure")
+        self.assertFalse(result["real_process_invoked"])
+
+    def test_popen_permission_oserror_reports_permission_error(self):
+        fake = self.write_fake("print('should not run')\n")
+        config = self.base_config("claude", fake)
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-claude-run-eacces.candidate.md"
+        err = PermissionError(real_runner.errno.EACCES, "permission denied")
+
+        with mock.patch.object(real_runner.subprocess, "Popen", side_effect=err):
+            result = invoke_agent(self.task_dir, config, "claude", "04", "read-only", self.prompt_path, candidate_path, "run-eacces")
 
         self.assertEqual(result["failure_class"], "permission_error")
         self.assertFalse(result["real_process_invoked"])
