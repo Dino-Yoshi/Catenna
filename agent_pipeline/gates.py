@@ -24,7 +24,7 @@ def run_stage4_gate_loop(task_dir, state, config, assignments, ensure_real_stage
     pass_number = len(state.get("stage_gate_passes") or []) + 1
     force_brief = pass_number > 1 or "04" not in state.get("completed_stages", [])
     force_audit = pass_number > 1 or "04_gate" not in state.get("completed_stages", [])
-    previous_rejection = None
+    previous_rejection = state.get("stage4_previous_rejection")
     while pass_number <= max_passes:
         code = ensure_real_stage(
             task_dir,
@@ -78,6 +78,7 @@ def run_stage4_gate_loop(task_dir, state, config, assignments, ensure_real_stage
             "brief_hash": sha256_file(task_dir / CONTRACTS["04"].filename),
             "audit_hash": sha256_file(task_dir / CONTRACTS["04_gate"].filename),
         }
+        state["stage4_previous_rejection"] = previous_rejection
         append_log(task_dir, {"event": "retry_scheduled", "stage": "04", "pass": pass_number + 1, "classification": FAILURE_CLASS_GATE_REJECTED, "run_id": state.get("run_id")})
         force_brief = True
         pass_number += 1
