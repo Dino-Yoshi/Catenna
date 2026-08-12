@@ -74,6 +74,10 @@ def usage_ledger_path():
     return USAGE_ROOT / "ledger.jsonl"
 
 
+def outcomes_ledger_path():
+    return USAGE_ROOT / "outcomes.jsonl"
+
+
 def cooldown_store_path():
     return USAGE_ROOT / "agent_cooldowns.json"
 
@@ -552,7 +556,10 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
             ledger_entries = usage.read_entries(usage_ledger_path())
         else:
             ledger_entries = []
-        overrides = cost_policy.compute_stage_overrides(config, ledger_entries)
+        quality_entries = []
+        if cost_control.get("quality_aware", False) and config.get("usage_ledger", {}).get("enabled", True):
+            quality_entries = usage.read_entries(outcomes_ledger_path())
+        overrides = cost_policy.compute_stage_overrides(config, ledger_entries, quality_entries=quality_entries)
         state["stage_overrides"] = overrides
         append_log(task_dir, {"event": "cost_policy_applied", "overrides": overrides, "run_id": state.get("run_id")})
     assignments = dict(state.get("stage_agents") or {})
@@ -670,7 +677,18 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
 
 
 def run_stage4_gate_loop(task_dir, state, config, assignments):
-    return gates_module.run_stage4_gate_loop(task_dir, state, config, assignments, ensure_real_stage, block_transition)
+    outcome_path = None
+    if config.get("usage_ledger", {}).get("enabled", True):
+        outcome_path = outcomes_ledger_path()
+    return gates_module.run_stage4_gate_loop(
+        task_dir,
+        state,
+        config,
+        assignments,
+        ensure_real_stage,
+        block_transition,
+        outcome_ledger_path=outcome_path,
+    )
 
 
 def stage4_rejected_gate_context(task_dir, state, pass_number):
