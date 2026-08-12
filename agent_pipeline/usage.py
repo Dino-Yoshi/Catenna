@@ -103,8 +103,45 @@ def read_entries(ledger_path):
 _USAGE_TOTAL_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
 
 
+def estimate_cost_usd(usage_data, model, codex_price_table):
+    if not isinstance(usage_data, dict) or not model:
+        return None
+    if not isinstance(codex_price_table, dict) or model not in codex_price_table:
+        return None
+    rates = codex_price_table.get(model)
+    if not isinstance(rates, dict):
+        return None
+    total = 0.0
+    for field in _USAGE_TOTAL_FIELDS:
+        raw_value = usage_data.get(field, 0)
+        if raw_value is None:
+            raw_value = 0
+        if isinstance(raw_value, bool):
+            return None
+        try:
+            tokens = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+        try:
+            rate = float(rates[field])
+        except (KeyError, TypeError, ValueError):
+            return None
+        total += (tokens * rate) / 1000000.0
+    return total
+
+
 def _new_bucket():
-    bucket = {"count": 0, "failures": 0, "duration_seconds": 0.0, "total_cost_usd": 0.0, "tokens_known": False, "cost_known": False, "cache_hit_ratio": None}
+    bucket = {
+        "count": 0,
+        "failures": 0,
+        "duration_seconds": 0.0,
+        "total_cost_usd": 0.0,
+        "total_cost_usd_estimated": 0.0,
+        "tokens_known": False,
+        "cost_known": False,
+        "cost_estimated_known": False,
+        "cache_hit_ratio": None,
+    }
     for field in _USAGE_TOTAL_FIELDS:
         bucket[field] = 0
     return bucket
@@ -130,6 +167,10 @@ def _accumulate(bucket, entry):
     if isinstance(cost, (int, float)):
         bucket["total_cost_usd"] += cost
         bucket["cost_known"] = True
+    estimated_cost = usage.get("total_cost_usd_estimated")
+    if not isinstance(estimated_cost, bool) and isinstance(estimated_cost, (int, float)):
+        bucket["total_cost_usd_estimated"] += estimated_cost
+        bucket["cost_estimated_known"] = True
 
 
 def summarize(entries, group_by="agent"):
