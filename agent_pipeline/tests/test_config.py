@@ -123,18 +123,24 @@ class ReasoningCaptureConfigTests(unittest.TestCase):
 
     def test_default_cost_control_is_disabled_and_valid(self):
         self.assertFalse(config.DEFAULT_CONFIG["cost_control"]["enabled"])
+        self.assertFalse(config.DEFAULT_CONFIG["cost_control"]["quality_aware"])
         self.assertEqual(config.DEFAULT_CONFIG["cost_control"]["min_samples"], 5)
+        self.assertEqual(config.DEFAULT_CONFIG["cost_control"]["max_rejection_rate"], 0.2)
         self.assertEqual(config.DEFAULT_CONFIG["cost_control"]["eligible_stages"], ["02", "03", "04", "04_gate", "07"])
         self.assertTrue(config.validate_config(config.deep_copy(config.DEFAULT_CONFIG)))
 
     def test_cost_control_validation_rejects_invalid_scalar_fields(self):
         cases = [
             ("enabled", "true"),
+            ("quality_aware", "true"),
             ("min_samples", True),
             ("min_samples", 0),
             ("max_retry_rate", True),
             ("max_retry_rate", -0.1),
             ("max_retry_rate", 1.1),
+            ("max_rejection_rate", True),
+            ("max_rejection_rate", -0.1),
+            ("max_rejection_rate", 1.1),
         ]
         for field, value in cases:
             bad = config.deep_copy(config.DEFAULT_CONFIG)
