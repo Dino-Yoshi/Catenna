@@ -713,6 +713,87 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertEqual(code, EXIT_SUCCESS)
             self.assertFalse(controller.outcomes_ledger_path().exists())
 
+    def test_stage4_gate_loop_skips_outcome_when_gate_artifact_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-quality-invalid-gate"
+            root = Path(tmp)
+            task_dir = root / task
+            task_dir.mkdir(parents=True)
+            self.with_usage_root(root / "usage")
+            state = new_state(task, "run-test")
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
+                if stage_key == "04":
+                    (task_dir_arg / CONTRACTS["04"].filename).write_text(valid_artifact("04"), encoding="utf-8")
+                    state_arg.setdefault("real_stage_runs", {}).setdefault("04", []).append({
+                        "agent": "claude",
+                        "model": "claude-haiku-4-5",
+                        "pass_number": pass_number,
+                        "finalized": True,
+                        "final_artifact_hash": controller.sha256_file(task_dir_arg / CONTRACTS["04"].filename),
+                    })
+                if stage_key == "04_gate":
+                    # Unquoted "#" inside the YAML gate block trips parse_gate's
+                    # malformed-syntax check, producing a reviewer-side defect
+                    # (valid: False) rather than a real verdict on the brief.
+                    (task_dir_arg / CONTRACTS["04_gate"].filename).write_text(
+                        gate_artifact("04_gate", "ready_for_implementation: true # stray comment"),
+                        encoding="utf-8",
+                    )
+                return EXIT_SUCCESS
+
+            original = controller.ensure_real_stage
+            controller.ensure_real_stage = fake_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original))
+
+            code = controller.run_stage4_gate_loop(
+                task_dir,
+                state,
+                {"max_gate_passes": 1, "usage_ledger": {"enabled": True}, "cost_control": {"quality_aware": True}},
+                {},
+            )
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertEqual(usage.read_entries(controller.outcomes_ledger_path()), [])
+
+    def test_stage4_gate_loop_skips_outcome_when_producer_unattributed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage4-quality-no-producer"
+            root = Path(tmp)
+            task_dir = root / task
+            task_dir.mkdir(parents=True)
+            self.with_usage_root(root / "usage")
+            state = new_state(task, "run-test")
+
+            def fake_ensure(task_dir_arg, state_arg, config_arg, stage_key, execution_mode, assignments, pass_number=1, force=False, extra_context=None):
+                if stage_key == "04":
+                    (task_dir_arg / CONTRACTS["04"].filename).write_text(valid_artifact("04"), encoding="utf-8")
+                    # No real_stage_runs["04"] entries recorded at all, so
+                    # finalized_stage4_producer has nothing to attribute to.
+                if stage_key == "04_gate":
+                    (task_dir_arg / CONTRACTS["04_gate"].filename).write_text(
+                        gate_artifact(
+                            "04_gate",
+                            "ready_for_implementation: true\nblocking_issues: []\nnonblocking_issues: []\nrequired_revision_targets: []",
+                        ),
+                        encoding="utf-8",
+                    )
+                return EXIT_SUCCESS
+
+            original = controller.ensure_real_stage
+            controller.ensure_real_stage = fake_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original))
+
+            code = controller.run_stage4_gate_loop(
+                task_dir,
+                state,
+                {"max_gate_passes": 1, "usage_ledger": {"enabled": True}, "cost_control": {"quality_aware": True}},
+                {},
+            )
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(usage.read_entries(controller.outcomes_ledger_path()), [])
+
     def test_stage4_gate_loop_archives_brief_before_identical_revision_block(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = "stage4-archive-identical"
