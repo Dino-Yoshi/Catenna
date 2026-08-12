@@ -31,6 +31,14 @@ class CostPolicyTests(unittest.TestCase):
             entry["model"] = model
         return entry
 
+    def outcome(self, stage="04", agent="claude", model="claude-haiku-4-5", accepted=True):
+        return {
+            "stage": stage,
+            "agent": agent,
+            "model": model,
+            "accepted": accepted,
+        }
+
     def test_disabled_returns_empty(self):
         cfg = config.deep_copy(config.DEFAULT_CONFIG)
 
@@ -203,6 +211,91 @@ class CostPolicyTests(unittest.TestCase):
         ]
 
         self.assertEqual(cost_policy.compute_stage_overrides(cfg, entries), {"03": {"agy": {"effort": "low"}}})
+
+    def test_quality_aware_false_ignores_bad_outcome_history(self):
+        cfg = self.enabled_config()
+        entries = [
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+        ]
+        quality_entries = [self.outcome(accepted=False), self.outcome(accepted=False)]
+
+        self.assertEqual(
+            cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries)["04"]["claude"],
+            {"model": "claude-haiku-4-5", "effort": "low"},
+        )
+
+    def test_quality_aware_stage4_rejection_rate_at_threshold_withholds_override(self):
+        cfg = self.enabled_config()
+        cfg["cost_control"]["quality_aware"] = True
+        cfg["cost_control"]["max_rejection_rate"] = 0.5
+        entries = [
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+        ]
+        quality_entries = [self.outcome(accepted=True), self.outcome(accepted=False)]
+
+        self.assertNotIn("04", cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries))
+
+    def test_quality_aware_missing_accepted_counts_as_rejection(self):
+        cfg = self.enabled_config()
+        cfg["cost_control"]["quality_aware"] = True
+        cfg["cost_control"]["max_rejection_rate"] = 0.51
+        entries = [
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+        ]
+        missing_accepted = self.outcome(accepted=True)
+        del missing_accepted["accepted"]
+        quality_entries = [self.outcome(accepted=True), missing_accepted]
+
+        self.assertIn("04", cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries))
+
+        cfg["cost_control"]["max_rejection_rate"] = 0.5
+        self.assertNotIn("04", cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries))
+
+    def test_quality_history_below_min_samples_defers_to_existing_behavior(self):
+        cfg = self.enabled_config()
+        cfg["cost_control"]["quality_aware"] = True
+        entries = [
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+        ]
+        quality_entries = [self.outcome(accepted=False)]
+
+        self.assertIn("04", cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries))
+
+    def test_quality_veto_filters_stage_agent_and_model(self):
+        cfg = self.enabled_config()
+        cfg["cost_control"]["quality_aware"] = True
+        entries = [
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+            self.entry("03", "claude", model="claude-sonnet-4-5"),
+            self.entry("03", "claude", model="claude-sonnet-4-5"),
+        ]
+        quality_entries = [
+            self.outcome(stage="03", accepted=False),
+            self.outcome(agent="codex", accepted=False),
+            self.outcome(model="other-model", accepted=False),
+            self.outcome(accepted=True),
+            self.outcome(accepted=True),
+        ]
+        overrides = cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries)
+
+        self.assertIn("04", overrides)
+        self.assertIn("03", overrides)
+
+    def test_quality_history_never_approves_unreliable_baseline(self):
+        cfg = self.enabled_config()
+        cfg["cost_control"]["quality_aware"] = True
+        entries = [
+            self.entry("04", "claude", model="claude-sonnet-4-5"),
+            self.entry("04", "claude", failure_class="timeout", model="claude-sonnet-4-5"),
+        ]
+        quality_entries = [self.outcome(accepted=True), self.outcome(accepted=True)]
+
+        self.assertEqual(cost_policy.compute_stage_overrides(cfg, entries, quality_entries=quality_entries), {})
 
 
 if __name__ == "__main__":

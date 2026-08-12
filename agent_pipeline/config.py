@@ -37,8 +37,10 @@ DEFAULT_CONFIG = {
     "usage_ledger": {"enabled": True},
     "cost_control": {
         "enabled": False,
+        "quality_aware": False,
         "min_samples": 5,
         "max_retry_rate": 0.2,
+        "max_rejection_rate": 0.2,
         "eligible_stages": ["02", "03", "04", "04_gate", "07"],
         "downgrade_candidates": {
             "claude": {"model": "claude-haiku-4-5", "effort": "low"},
@@ -211,12 +213,17 @@ def validate_cost_control_config(config):
         raise ConfigError("cost_control must be a mapping")
     if not isinstance(cost_control.get("enabled"), bool):
         raise ConfigError("cost_control.enabled must be a boolean")
+    if not isinstance(cost_control.get("quality_aware"), bool):
+        raise ConfigError("cost_control.quality_aware must be a boolean")
     min_samples = cost_control.get("min_samples")
     if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 1:
         raise ConfigError("cost_control.min_samples must be a positive integer")
     max_retry_rate = cost_control.get("max_retry_rate")
     if isinstance(max_retry_rate, bool) or not isinstance(max_retry_rate, (int, float)) or max_retry_rate < 0 or max_retry_rate > 1:
         raise ConfigError("cost_control.max_retry_rate must be a number in [0, 1]")
+    max_rejection_rate = cost_control.get("max_rejection_rate")
+    if isinstance(max_rejection_rate, bool) or not isinstance(max_rejection_rate, (int, float)) or max_rejection_rate < 0 or max_rejection_rate > 1:
+        raise ConfigError("cost_control.max_rejection_rate must be a number in [0, 1]")
     eligible_stages = cost_control.get("eligible_stages")
     if not isinstance(eligible_stages, list) or not all(isinstance(stage, str) for stage in eligible_stages):
         raise ConfigError("cost_control.eligible_stages must be a list of strings")
