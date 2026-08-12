@@ -106,6 +106,57 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(summary["overall"]["count"], 3)
         self.assertEqual(summary["overall"]["output_tokens"], 5)
 
+    def test_estimate_cost_usd_sums_configured_codex_rates(self):
+        estimated = usage.estimate_cost_usd(
+            {"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 50, "cache_creation_tokens": 10},
+            "gpt-5-codex",
+            {"gpt-5-codex": {"input_tokens": 2, "output_tokens": 8, "cache_read_tokens": 0.5, "cache_creation_tokens": 1}},
+        )
+
+        self.assertAlmostEqual(estimated, ((100 * 2) + (20 * 8) + (50 * 0.5) + (10 * 1)) / 1000000.0)
+
+    def test_estimate_cost_usd_unknown_when_model_or_table_missing(self):
+        prices = {"gpt-5-codex": {"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 1, "cache_creation_tokens": 1}}
+        self.assertIsNone(usage.estimate_cost_usd({"input_tokens": 1}, None, prices))
+        self.assertIsNone(usage.estimate_cost_usd({"input_tokens": 1}, "missing", prices))
+        self.assertIsNone(usage.estimate_cost_usd(None, "gpt-5-codex", prices))
+
+    def test_estimate_cost_usd_missing_token_fields_count_as_zero(self):
+        estimated = usage.estimate_cost_usd(
+            {"input_tokens": 100, "output_tokens": None},
+            "gpt-5-codex",
+            {"gpt-5-codex": {"input_tokens": 2, "output_tokens": 8, "cache_read_tokens": 0.5, "cache_creation_tokens": 1}},
+        )
+
+        self.assertAlmostEqual(estimated, 200 / 1000000.0)
+
+    def test_estimate_cost_usd_invalid_token_values_return_none(self):
+        prices = {"gpt-5-codex": {"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 1, "cache_creation_tokens": 1}}
+        self.assertIsNone(usage.estimate_cost_usd({"input_tokens": "many"}, "gpt-5-codex", prices))
+        self.assertIsNone(usage.estimate_cost_usd({"input_tokens": True}, "gpt-5-codex", prices))
+
+    def test_summarize_aggregates_estimated_cost_separately_from_real_cost(self):
+        entries = [
+            {"agent": "codex", "usage": {"input_tokens": 10, "total_cost_usd_estimated": 0.02}},
+            {"agent": "codex", "usage": {"input_tokens": 5, "total_cost_usd": 0.01}},
+            {"agent": "claude", "usage": {"total_cost_usd_estimated": None}},
+        ]
+        summary = usage.summarize(entries, group_by="agent")
+        codex = summary["groups"]["codex"]
+
+        self.assertAlmostEqual(codex["total_cost_usd_estimated"], 0.02)
+        self.assertTrue(codex["cost_estimated_known"])
+        self.assertAlmostEqual(codex["total_cost_usd"], 0.01)
+        self.assertTrue(codex["cost_known"])
+        self.assertAlmostEqual(summary["overall"]["total_cost_usd_estimated"], 0.02)
+
+    def test_summarize_historical_entries_without_estimated_cost_are_unknown(self):
+        summary = usage.summarize([{"agent": "codex", "usage": {"input_tokens": 10, "total_cost_usd": 0.01}}])
+
+        self.assertTrue(summary["overall"]["cost_known"])
+        self.assertFalse(summary["overall"]["cost_estimated_known"])
+        self.assertEqual(summary["overall"]["total_cost_usd_estimated"], 0.0)
+
     def test_summarize_computes_cache_hit_ratio_when_tokens_known(self):
         entries = [
             {"agent": "codex", "usage": {"input_tokens": 30, "cache_read_tokens": 70}},

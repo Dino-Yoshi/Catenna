@@ -414,10 +414,11 @@ def pipeline_usage(task=None, agent=None, since_hours=None):
     for name in sorted(summary["groups"]):
         bucket = summary["groups"][name]
         tokens = "in=%d out=%d" % (bucket["input_tokens"], bucket["output_tokens"]) if bucket["tokens_known"] else "tokens=unknown"
-        cost = ("$%.4f" % bucket["total_cost_usd"]) if bucket["cost_known"] else "cost=unknown"
-        print("  %s: calls=%d failures=%d duration=%.1fs %s %s %s" % (name, bucket["count"], bucket["failures"], bucket["duration_seconds"], tokens, cost, format_cache_hit(bucket)))
+        cost = format_cost(bucket)
+        estimated_cost = format_estimated_cost(bucket)
+        print("  %s: calls=%d failures=%d duration=%.1fs %s %s %s %s" % (name, bucket["count"], bucket["failures"], bucket["duration_seconds"], tokens, cost, estimated_cost, format_cache_hit(bucket)))
     overall = summary["overall"]
-    print("overall: calls=%d failures=%d duration=%.1fs %s" % (overall["count"], overall["failures"], overall["duration_seconds"], format_cache_hit(overall)))
+    print("overall: calls=%d failures=%d duration=%.1fs %s %s %s" % (overall["count"], overall["failures"], overall["duration_seconds"], format_cost(overall), format_estimated_cost(overall), format_cache_hit(overall)))
     try:
         cooldowns = usage.load_cooldowns(cooldown_store_path())
         if cooldowns:
@@ -425,6 +426,14 @@ def pipeline_usage(task=None, agent=None, since_hours=None):
     except Exception:
         pass
     return EXIT_SUCCESS
+
+
+def format_cost(bucket):
+    return ("cost=$%.4f" % bucket["total_cost_usd"]) if bucket["cost_known"] else "cost=unknown"
+
+
+def format_estimated_cost(bucket):
+    return ("cost_estimated=$%.4f" % bucket["total_cost_usd_estimated"]) if bucket.get("cost_estimated_known") else "cost_estimated=unknown"
 
 
 def format_cache_hit(bucket):

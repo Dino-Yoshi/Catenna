@@ -129,6 +129,76 @@ class ReasoningCaptureConfigTests(unittest.TestCase):
         self.assertEqual(config.DEFAULT_CONFIG["cost_control"]["eligible_stages"], ["02", "03", "04", "04_gate", "07"])
         self.assertTrue(config.validate_config(config.deep_copy(config.DEFAULT_CONFIG)))
 
+    def test_default_pricing_has_empty_codex_table(self):
+        self.assertEqual(config.DEFAULT_CONFIG["pricing"]["codex"], {})
+        self.assertTrue(config.validate_config(config.deep_copy(config.DEFAULT_CONFIG)))
+
+    def test_valid_codex_pricing_is_accepted(self):
+        cfg = config.deep_copy(config.DEFAULT_CONFIG)
+        cfg["pricing"]["codex"]["gpt-5-codex"] = {
+            "input_tokens": 1.25,
+            "output_tokens": 10,
+            "cache_read_tokens": 0.125,
+            "cache_creation_tokens": 1,
+        }
+        self.assertTrue(config.validate_config(cfg))
+
+    def test_pricing_containers_must_be_mappings(self):
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["pricing"] = []
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("pricing", str(raised.exception))
+
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["pricing"]["codex"] = []
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("pricing.codex", str(raised.exception))
+
+    def test_codex_pricing_model_keys_must_be_non_empty_strings(self):
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["pricing"]["codex"][""] = {
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cache_read_tokens": 1,
+            "cache_creation_tokens": 1,
+        }
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("model keys", str(raised.exception))
+
+    def test_codex_pricing_model_values_must_be_mappings(self):
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["pricing"]["codex"]["gpt-5-codex"] = []
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("gpt-5-codex", str(raised.exception))
+
+    def test_codex_pricing_requires_all_rates(self):
+        bad = config.deep_copy(config.DEFAULT_CONFIG)
+        bad["pricing"]["codex"]["gpt-5-codex"] = {
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cache_read_tokens": 1,
+        }
+        with self.assertRaises(config.ConfigError) as raised:
+            config.validate_config(bad)
+        self.assertIn("cache_creation_tokens", str(raised.exception))
+
+    def test_codex_pricing_rejects_bool_negative_and_non_numeric_rates(self):
+        for value in (True, -0.1, "1"):
+            bad = config.deep_copy(config.DEFAULT_CONFIG)
+            bad["pricing"]["codex"]["gpt-5-codex"] = {
+                "input_tokens": value,
+                "output_tokens": 1,
+                "cache_read_tokens": 1,
+                "cache_creation_tokens": 1,
+            }
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_config(bad)
+            self.assertIn("input_tokens", str(raised.exception))
+
     def test_cost_control_validation_rejects_invalid_scalar_fields(self):
         cases = [
             ("enabled", "true"),

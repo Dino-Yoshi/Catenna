@@ -180,6 +180,65 @@ class StreamingRunnerTests(unittest.TestCase):
         self.assertEqual(entry["task"], "task-usage")
         self.assertEqual(entry["agent"], "claude")
         self.assertEqual(entry["usage"]["input_tokens"], 100)
+        self.assertIsNone(entry["usage"]["total_cost_usd_estimated"])
+
+    def test_codex_usage_with_configured_model_records_estimated_cost(self):
+        fake = self.write_fake(
+            """
+            import sys
+            out_path = sys.argv[sys.argv.index("--output-last-message") + 1]
+            with open(out_path, "w") as handle:
+                handle.write("ok")
+            print('{"type":"thread.started","thread_id":"t1"}')
+            print('{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20,'
+                  '"cached_input_tokens":50,"cache_write_input_tokens":10}}')
+            """
+        )
+        config = self.base_config("codex", fake)
+        config["agents"]["codex"]["model"] = "gpt-5-codex"
+        config["pricing"] = {
+            "codex": {
+                "gpt-5-codex": {
+                    "input_tokens": 2,
+                    "output_tokens": 8,
+                    "cache_read_tokens": 0.5,
+                    "cache_creation_tokens": 1,
+                }
+            }
+        }
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-codex-run-cost.candidate.md"
+        ledger_path = self.root / "usage" / "ledger.jsonl"
+        result = invoke_agent(
+            self.task_dir, config, "codex", "04", "read-only", self.prompt_path, candidate_path, "run-cost",
+            task="task-cost", ledger_path=ledger_path,
+        )
+
+        expected = ((100 * 2) + (20 * 8) + (50 * 0.5) + (10 * 1)) / 1000000.0
+        self.assertAlmostEqual(result["usage"]["total_cost_usd_estimated"], expected)
+        entry = json.loads(ledger_path.read_text(encoding="utf-8").strip())
+        self.assertAlmostEqual(entry["usage"]["total_cost_usd_estimated"], expected)
+
+    def test_codex_usage_without_configured_model_records_unknown_estimated_cost(self):
+        fake = self.write_fake(
+            """
+            import sys
+            out_path = sys.argv[sys.argv.index("--output-last-message") + 1]
+            with open(out_path, "w") as handle:
+                handle.write("ok")
+            print('{"type":"thread.started","thread_id":"t1"}')
+            print('{"type":"turn.completed","usage":{"input_tokens":100}}')
+            """
+        )
+        config = self.base_config("codex", fake)
+        config["pricing"] = {"codex": {}}
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-codex-run-unknown-cost.candidate.md"
+        ledger_path = self.root / "usage" / "ledger.jsonl"
+        result = invoke_agent(
+            self.task_dir, config, "codex", "04", "read-only", self.prompt_path, candidate_path, "run-unknown-cost",
+            task="task-cost", ledger_path=ledger_path,
+        )
+
+        self.assertIsNone(result["usage"]["total_cost_usd_estimated"])
 
     def test_reasoning_bearing_stream_writes_sidecar_and_result_field(self):
         fake = self.write_fake(

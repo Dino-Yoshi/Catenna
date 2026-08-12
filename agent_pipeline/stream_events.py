@@ -100,15 +100,15 @@ def final_text(agent, stdout_text, events=None):
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
-def _normalize_usage(raw_usage, total_cost_usd=None):
+def _normalize_usage(raw_usage, total_cost_usd=None, cache_read_field="cache_read_input_tokens", cache_creation_field="cache_creation_input_tokens"):
     if not isinstance(raw_usage, dict) and total_cost_usd is None:
         return None
     raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
     normalized = {
         "input_tokens": raw_usage.get("input_tokens"),
         "output_tokens": raw_usage.get("output_tokens"),
-        "cache_read_tokens": raw_usage.get("cache_read_input_tokens"),
-        "cache_creation_tokens": raw_usage.get("cache_creation_input_tokens"),
+        "cache_read_tokens": raw_usage.get(cache_read_field),
+        "cache_creation_tokens": raw_usage.get(cache_creation_field),
         "total_cost_usd": total_cost_usd if total_cost_usd is not None else raw_usage.get("total_cost_usd"),
     }
     if all(value is None for value in normalized.values()):
@@ -133,7 +133,7 @@ def usage_summary(agent, stdout_text, events=None):
     for obj in events:
         if agent == "codex":
             if obj.get("type") == "turn.completed" and isinstance(obj.get("usage"), dict):
-                usage = _normalize_usage(obj["usage"])
+                usage = _normalize_usage(obj["usage"], cache_read_field="cached_input_tokens", cache_creation_field="cache_write_input_tokens")
         elif agent == "claude":
             if obj.get("type") == "result":
                 usage = _normalize_usage(obj.get("usage"), total_cost_usd=obj.get("total_cost_usd"))

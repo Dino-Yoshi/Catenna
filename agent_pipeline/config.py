@@ -35,6 +35,9 @@ DEFAULT_CONFIG = {
     },
     "enable_auto_verified": True,
     "usage_ledger": {"enabled": True},
+    "pricing": {
+        "codex": {},
+    },
     "cost_control": {
         "enabled": False,
         "quality_aware": False,
@@ -151,6 +154,7 @@ def validate_config(config):
     usage_ledger = config.get("usage_ledger", {})
     if not isinstance(usage_ledger, dict) or not isinstance(usage_ledger.get("enabled"), bool):
         raise ConfigError("usage_ledger.enabled must be a boolean")
+    validate_pricing_config(config)
     validate_cost_control_config(config)
     cooldowns = config.get("cross_task_cooldowns", {})
     if not isinstance(cooldowns, dict) or not isinstance(cooldowns.get("enabled"), bool):
@@ -175,6 +179,29 @@ def validate_config(config):
         if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
             raise ConfigError("turn_budgets.%s must be a positive integer" % stage)
     return True
+
+
+def validate_pricing_config(config):
+    pricing = config.get("pricing", {})
+    if not isinstance(pricing, Mapping):
+        raise ConfigError("pricing must be a mapping")
+    codex = pricing.get("codex", {})
+    if not isinstance(codex, Mapping):
+        raise ConfigError("pricing.codex must be a mapping")
+    required_rates = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
+    for model, rates in codex.items():
+        if not isinstance(model, str) or not model:
+            raise ConfigError("pricing.codex model keys must be non-empty strings")
+        if not isinstance(rates, Mapping):
+            raise ConfigError("pricing.codex.%s must be a mapping" % model)
+        for rate_name in required_rates:
+            if rate_name not in rates:
+                raise ConfigError("pricing.codex.%s.%s is required" % (model, rate_name))
+            value = rates.get(rate_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError("pricing.codex.%s.%s must be a non-negative number" % (model, rate_name))
+            if value < 0:
+                raise ConfigError("pricing.codex.%s.%s must be a non-negative number" % (model, rate_name))
 
 
 def validate_verification_config(config):
