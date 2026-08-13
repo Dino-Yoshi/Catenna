@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .artifacts import CONTRACTS, manual_test_decision, sha256_file, useful_partial, validate_file, validate_text
 from . import color
+from . import config
 from . import cost_policy
 from .config import ConfigError, configured_candidates, agent_config, load_config
 from .failures import (
@@ -201,6 +202,33 @@ def list_tasks(plain=False):
         except CorruptState:
             state_label = "CORRUPT"
         print("%s %s  %s" % (marker, name, color.colorize_state(state_label)))
+    return EXIT_SUCCESS
+
+
+def pipeline_init(force=False):
+    tasks_existed = TASKS_ROOT.exists()
+    usage_existed = USAGE_ROOT.exists()
+    config_existed = config.CONFIG_PATH.exists()
+
+    TASKS_ROOT.mkdir(parents=True, exist_ok=True)
+    USAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    default_text = json.dumps(config.DEFAULT_CONFIG, indent=2, sort_keys=True) + "\n"
+    if not config_existed:
+        config.CONFIG_PATH.write_text(default_text, encoding="utf-8")
+        config_status = "created"
+    elif force:
+        config.CONFIG_PATH.write_text(default_text, encoding="utf-8")
+        config_status = "overwritten with defaults"
+    else:
+        config_status = "exists, unchanged"
+
+    print("%s: %s" % (config.CONFIG_PATH, config_status))
+    print("%s: %s" % (TASKS_ROOT, "exists" if tasks_existed else "created"))
+    print("%s: %s" % (USAGE_ROOT, "exists" if usage_existed else "created"))
+
+    config.load_config()
     return EXIT_SUCCESS
 
 

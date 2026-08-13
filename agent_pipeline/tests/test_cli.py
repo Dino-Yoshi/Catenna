@@ -152,6 +152,42 @@ class CliParserTests(unittest.TestCase):
         args = parser.parse_args(["usage", "--task", "some-task"])
         self.assertEqual(args.task, "some-task")
 
+    def test_init_is_repo_level_command_without_task(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["init"])
+
+        self.assertEqual(args.command, "init")
+        self.assertFalse(args.force)
+        self.assertFalse(hasattr(args, "task"))
+
+    def test_init_force_parses(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["init", "--force"])
+
+        self.assertEqual(args.command, "init")
+        self.assertTrue(args.force)
+
+    def test_init_rejects_positional_task(self):
+        parser = cli.build_parser()
+        err = io.StringIO()
+
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["init", "some-task"])
+
+    def test_init_calls_controller_pipeline_init(self):
+        calls = []
+        original = cli.controller.pipeline_init
+        cli.controller.pipeline_init = lambda force=False: calls.append(force) or EXIT_SUCCESS
+        self.addCleanup(lambda: setattr(cli.controller, "pipeline_init", original))
+
+        code = cli.main(["init", "--force"])
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(calls, [True])
+
     def test_tasks_plain_flag_parses(self):
         parser = cli.build_parser()
 
@@ -247,6 +283,15 @@ class CliCompletionCommandTests(unittest.TestCase):
 
         self.assertIn("--bg", script)
         self.assertIn("--background", script)
+
+    def test_completion_bash_includes_init_force(self):
+        parser = cli.build_parser()
+        sub = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+
+        script = cli.build_completion_bash(sub)
+
+        self.assertIn("init)", script)
+        self.assertIn("--force", script)
 
 
 if __name__ == "__main__":

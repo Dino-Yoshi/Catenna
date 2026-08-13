@@ -2,12 +2,14 @@ from __future__ import print_function
 
 import io
 import inspect
+import json
 import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
+from agent_pipeline import config
 from agent_pipeline import controller
 from agent_pipeline import gates
 from agent_pipeline import prompts
@@ -22,10 +24,15 @@ class ControllerReliabilityTests(unittest.TestCase):
     def setUp(self):
         # Keep captured-stdout assertions independent from the caller's shell,
         # regardless of how the test runner imports this module.
-        for key in ("FORCE_COLOR", "NO_COLOR"):
+        for key in ("FORCE_COLOR", "NO_COLOR", "CODEX_CMD", "CLAUDE_CMD", "AGY_CMD"):
             original = os.environ.pop(key, None)
             if original is not None:
                 self.addCleanup(os.environ.__setitem__, key, original)
+
+    def with_repo_root(self, root):
+        original = controller.REPO_ROOT
+        controller.REPO_ROOT = root
+        self.addCleanup(lambda: setattr(controller, "REPO_ROOT", original))
 
     def with_tasks_root(self, root):
         original = controller.TASKS_ROOT
@@ -36,6 +43,17 @@ class ControllerReliabilityTests(unittest.TestCase):
         original = controller.USAGE_ROOT
         controller.USAGE_ROOT = root
         self.addCleanup(lambda: setattr(controller, "USAGE_ROOT", original))
+
+    def with_config_path(self, path):
+        original = config.CONFIG_PATH
+        config.CONFIG_PATH = path
+        self.addCleanup(lambda: setattr(config, "CONFIG_PATH", original))
+
+    def with_init_roots(self, root):
+        self.with_repo_root(root)
+        self.with_tasks_root(root / ".agent-pipeline" / "tasks")
+        self.with_usage_root(root / ".agent-pipeline" / "usage")
+        self.with_config_path(root / ".agent-pipeline" / "config" / "orchestrator.json")
 
     def capture_dry_run(self, task):
         output = io.StringIO()
@@ -72,6 +90,105 @@ class ControllerReliabilityTests(unittest.TestCase):
         with redirect_stdout(output):
             code = controller.pipeline_verify_background(task, run_build=run_build)
         return code, output.getvalue()
+
+    def capture_init(self, force=False):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = controller.pipeline_init(force=force)
+        return code, output.getvalue()
+
+    def default_config_text(self):
+        return json.dumps(config.DEFAULT_CONFIG, indent=2, sort_keys=True) + "\n"
+
+    def test_pipeline_init_scaffolds_missing_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+
+            code, output = self.capture_init()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertTrue(config.CONFIG_PATH.exists())
+            self.assertTrue(controller.TASKS_ROOT.is_dir())
+            self.assertTrue(controller.USAGE_ROOT.is_dir())
+            self.assertEqual(config.CONFIG_PATH.read_text(encoding="utf-8"), self.default_config_text())
+            self.assertEqual(config.load_config(), config.DEFAULT_CONFIG)
+            self.assertIn(str(config.CONFIG_PATH), output)
+            self.assertIn(str(controller.TASKS_ROOT), output)
+            self.assertIn(str(controller.USAGE_ROOT), output)
+            self.assertIn("created", output)
+            self.assertFalse(controller.current_task_path().exists())
+            self.assertEqual(list(controller.TASKS_ROOT.iterdir()), [])
+
+    def test_pipeline_init_existing_config_is_unchanged_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+            config.CONFIG_PATH.parent.mkdir(parents=True)
+            custom_text = json.dumps({"schema_version": 2, "timeout_seconds": 1234}, sort_keys=True) + "\n"
+            config.CONFIG_PATH.write_text(custom_text, encoding="utf-8")
+
+            code, output = self.capture_init()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(config.CONFIG_PATH.read_text(encoding="utf-8"), custom_text)
+            self.assertIn("unchanged", output)
+            self.assertIn(str(config.CONFIG_PATH), output)
+
+    def test_pipeline_init_force_overwrites_existing_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+            config.CONFIG_PATH.parent.mkdir(parents=True)
+            config.CONFIG_PATH.write_text(json.dumps({"schema_version": 2, "timeout_seconds": 1234}) + "\n", encoding="utf-8")
+
+            code, output = self.capture_init(force=True)
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(config.CONFIG_PATH.read_text(encoding="utf-8"), self.default_config_text())
+            self.assertIn("overwritten", output)
+
+    def test_pipeline_init_creates_missing_parts_of_partial_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+            controller.TASKS_ROOT.mkdir(parents=True)
+
+            code, output = self.capture_init()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertTrue(config.CONFIG_PATH.exists())
+            self.assertTrue(controller.TASKS_ROOT.is_dir())
+            self.assertTrue(controller.USAGE_ROOT.is_dir())
+            self.assertIn(str(controller.TASKS_ROOT), output)
+            self.assertIn("exists", output)
+
+    def test_pipeline_init_invalid_existing_config_propagates_config_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+            config.CONFIG_PATH.parent.mkdir(parents=True)
+            config.CONFIG_PATH.write_text(json.dumps({"schema_version": 999}) + "\n", encoding="utf-8")
+
+            with self.assertRaises(config.ConfigError):
+                self.capture_init()
+
+            self.assertTrue(controller.TASKS_ROOT.is_dir())
+            self.assertTrue(controller.USAGE_ROOT.is_dir())
+            self.assertIn("999", config.CONFIG_PATH.read_text(encoding="utf-8"))
+
+    def test_pipeline_init_force_repairs_invalid_existing_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+            config.CONFIG_PATH.parent.mkdir(parents=True)
+            config.CONFIG_PATH.write_text(json.dumps({"schema_version": 999}) + "\n", encoding="utf-8")
+
+            code, output = self.capture_init(force=True)
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(config.CONFIG_PATH.read_text(encoding="utf-8"), self.default_config_text())
+            self.assertIn("overwritten", output)
 
     def test_task_dir_for_accepts_safe_task_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
