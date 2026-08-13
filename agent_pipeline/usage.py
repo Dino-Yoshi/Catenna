@@ -104,6 +104,12 @@ _USAGE_TOTAL_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "ca
 
 
 def estimate_cost_usd(usage_data, model, codex_price_table):
+    # Flat per-token rates only. Some providers charge tiered rates above a
+    # prompt-length threshold (e.g. a 2x input / 1.5x output multiplier for
+    # the whole session past ~272K input tokens) - this function has no
+    # threshold logic and will under-estimate cost for sessions that cross
+    # one. Known limitation, not yet worth modeling without confirmed
+    # thresholds/multipliers for every priced model.
     if not isinstance(usage_data, dict) or not model:
         return None
     if not isinstance(codex_price_table, dict) or model not in codex_price_table:

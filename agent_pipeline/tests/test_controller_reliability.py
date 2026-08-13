@@ -1339,6 +1339,60 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertIn("cost_estimated=unknown", output)
             self.assertNotIn("cost_estimated=$0.0000", output)
 
+    def test_pipeline_usage_warns_when_codex_model_unset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_usage_root(root / "usage")
+            usage.append_entry(
+                controller.usage_ledger_path(),
+                usage.build_entry("t", "r", "02", "codex", {"duration_seconds": 1.0, "failure_class": None}, {"input_tokens": 25}),
+            )
+
+            original_load_config = controller.load_config
+            unconfigured = controller.load_config()
+            unconfigured["agents"]["codex"]["model"] = None
+            controller.load_config = lambda: unconfigured
+            self.addCleanup(lambda: setattr(controller, "load_config", original_load_config))
+
+            code, output = self.capture_usage()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertIn("agents.codex.model is unset", output)
+
+    def test_pipeline_usage_no_warning_when_codex_model_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_usage_root(root / "usage")
+            usage.append_entry(
+                controller.usage_ledger_path(),
+                usage.build_entry("t", "r", "02", "codex", {"duration_seconds": 1.0, "failure_class": None}, {"input_tokens": 25}),
+            )
+
+            original_load_config = controller.load_config
+            configured = controller.load_config()
+            configured["agents"]["codex"]["model"] = "gpt-5.5"
+            controller.load_config = lambda: configured
+            self.addCleanup(lambda: setattr(controller, "load_config", original_load_config))
+
+            code, output = self.capture_usage()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertNotIn("agents.codex.model is unset", output)
+
+    def test_pipeline_usage_no_warning_when_no_codex_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_usage_root(root / "usage")
+            usage.append_entry(
+                controller.usage_ledger_path(),
+                usage.build_entry("t", "r", "07", "claude", {"duration_seconds": 1.0, "failure_class": None}, {"input_tokens": 25, "output_tokens": 5, "total_cost_usd": 0.0001}),
+            )
+
+            code, output = self.capture_usage()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertNotIn("agents.codex.model is unset", output)
+
     def test_pipeline_verify_reports_invalid_config_like_pipeline_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
