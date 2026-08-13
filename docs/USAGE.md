@@ -53,15 +53,19 @@ Real `catenna run` validates both seed artifacts before calling agents. It
 blocks if either file is missing or invalid.
 
 ```bash
-catenna run
+catenna run --background
+catenna tail
 ```
 
-The selected current task is used when a task-taking command omits the
-positional `task`. You can also pass it explicitly:
+Running in the background from the start (rather than foreground first,
+backgrounding later) frees the shell immediately; `catenna tail` follows
+progress from the same terminal. The selected current task is used when a
+task-taking command omits the positional `task`. You can also pass it
+explicitly:
 
 ```bash
-catenna run my-task
-python3 -m agent_pipeline.cli run my-task
+catenna run my-task --background
+python3 -m agent_pipeline.cli run my-task --background
 ```
 
 ## Task Lifecycle
@@ -242,8 +246,13 @@ For changes to Catenna itself:
 2. Branch from `main`.
 3. Run `catenna use <task>`.
 4. Write `.agent-pipeline/tasks/<task>/00_original_request.md` and `01_requirements_packet.md` by hand.
-5. Run `catenna run` in the foreground first.
-6. Use `catenna run --background` and `catenna tail` when useful, especially once Stage 05 begins.
+5. Run `catenna run --background` (or `--bg`) for the whole task, from the
+   first invocation — don't run it in the foreground and switch over later.
+   This frees the shell immediately instead of blocking it for however long
+   Stage 02-05's real agent calls take.
+6. Use `catenna tail` (and `catenna status`) from the same or another
+   terminal to monitor progress instead of watching a blocked foreground
+   process.
 7. Supervise with `catenna status`, `catenna dry-run`, `catenna brief --verbose`, and `catenna report`.
 8. When complete, read `08_decision.md`; treat `reject` and `needs_followup` as real feedback, not as success.
 9. Run `python3 -m unittest discover -s agent_pipeline/tests` as an explicit gate.
