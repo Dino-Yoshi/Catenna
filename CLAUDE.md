@@ -4,7 +4,7 @@ This repo is `agent_pipeline/`, nicknamed **Catenna**: a deterministic
 multi-agent pipeline orchestrator. Full design/state-machine docs live in
 `docs/OVERVIEW.md` — read that for how the pipeline actually works. This
 file is just CLI ergonomics so a fresh session doesn't have to rediscover
-them.
+them. End-to-end operating instructions live in `docs/USAGE.md`.
 
 ## Invoking it
 
