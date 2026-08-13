@@ -55,18 +55,18 @@ Both pipelines drive coding-agent CLIs (`codex`, `claude`, `agy`/Antigravity)
 through the same 8-stage workflow and read/write the same
 `.agent-pipeline/tasks/<task>/` artifact files:
 
-| Stage    | Artifact                        | Purpose                              |
-|----------|----------------------------------|---------------------------------------|
-| 00       | `00_original_request.md`         | Seed: the raw task ask                |
-| 01       | `01_requirements_packet.md`      | Requirements/design packet            |
-| 02       | `02_technical_spec.md`           | Technical specification               |
-| 03       | `03_audit.md`                    | Independent audit of the spec         |
-| 04       | `04_final_codex_brief.md`        | Final implementation brief            |
-| 04_gate  | `04_final_brief_audit.md`        | Independent audit of the brief        |
-| 05       | `05_codex_implementation_report.md` | Implementation report              |
-| 06       | `06_manual_test_notes.md`        | Manual test notes                     |
-| 07       | `07_diff_review.md`              | Independent diff review               |
-| 08       | `08_decision.md`                 | Accept / reject / needs-follow-up     |
+| Stage    | Artifact                        | Purpose                              | Written by |
+|----------|----------------------------------|---------------------------------------|------------|
+| 00       | `00_original_request.md`         | Seed: the raw task ask                | Human or overseer seed |
+| 01       | `01_requirements_packet.md`      | Requirements/design packet            | Human or overseer seed |
+| 02       | `02_technical_spec.md`           | Technical specification               | Real read-only agent |
+| 03       | `03_audit.md`                    | Independent audit of the spec         | Real read-only agent |
+| 04       | `04_final_codex_brief.md`        | Final implementation brief            | Real read-only agent |
+| 04_gate  | `04_final_brief_audit.md`        | Independent audit of the brief        | Real read-only independent gate agent |
+| 05       | `05_codex_implementation_report.md` | Implementation report              | Real workspace-write agent |
+| 06       | `06_manual_test_notes.md`        | Manual test notes                     | Human/overseer notes or controller-written auto-verification notes |
+| 07       | `07_diff_review.md`              | Independent diff review               | Real read-only independent diff-review agent |
+| 08       | `08_decision.md`                 | Accept / reject / needs-follow-up     | Deterministic controller synthesis |
 
 Each driven project's own agent-facing instructions (its `AGENTS.md`, if it
 has one) typically treat `04_final_codex_brief.md` as the implementation
@@ -406,6 +406,9 @@ for the exact argparse definitions). A driven project's own
 `Makefile.orchestrator` is a thin wrapper around the same commands, pointed
 at this repo. This table grows as commands are added.
 
+For end-to-end walkthroughs and operator troubleshooting, see
+[USAGE.md](USAGE.md).
+
 `task` is a **positional, optional** argument on every task-taking command
 except `usage`. If omitted, the command falls back to the current-task
 pointer set by `use`/`select`/`set`; if neither is available it fails with a
@@ -415,6 +418,7 @@ target, and it never consults the current-task pointer.
 
 | Command             | Task argument            | Other flags                       | What it does                                   |
 |----------------------|----------------------------|--------------------------------------|-------------------------------------------------|
+| `init`               | n/a (never takes a task)   | `--force`                            | Scaffolds `.agent-pipeline/tasks/`, `.agent-pipeline/usage/`, and `.agent-pipeline/config/orchestrator.json`; `--force` overwrites config defaults. |
 | `status`             | positional, optional       | —                                    | Shows controller status for a task.             |
 | `dry-run`            | positional, optional       | —                                    | Shows resumable work without mutating state.    |
 | `mock-test`          | n/a (never takes a task)   | —                                    | Runs isolated deterministic mock scenarios.     |
