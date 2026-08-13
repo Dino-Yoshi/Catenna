@@ -426,6 +426,18 @@ def pipeline_usage(task=None, agent=None, since_hours=None):
     overall = summary["overall"]
     overall_tokens = "in=%d out=%d" % (overall["input_tokens"], overall["output_tokens"]) if overall["tokens_known"] else "tokens=unknown"
     print("overall: calls=%d failures=%d duration=%.1fs %s %s %s %s" % (overall["count"], overall["failures"], overall["duration_seconds"], overall_tokens, format_cost(overall), format_estimated_cost(overall), format_cache_hit(overall)))
+    if "codex" in summary["groups"]:
+        try:
+            config = load_config()
+        except ConfigError:
+            config = None
+        if config is not None and not config.get("agents", {}).get("codex", {}).get("model"):
+            print(
+                "warning: agents.codex.model is unset - codex cost tracking and model "
+                "attribution are disabled (codex falls back to its own CLI default, which "
+                "this pipeline cannot see or record). Set agents.codex.model and a matching "
+                "pricing.codex rate table in orchestrator.json to fix this."
+            )
     try:
         cooldowns = usage.load_cooldowns(cooldown_store_path())
         if cooldowns:
