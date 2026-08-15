@@ -231,9 +231,12 @@ Nested schemas validated by `config.py`:
 - `verification.driven_project_commands[].argv`: required non-empty list of strings.
 - `verification.driven_project_commands[].timeout_seconds`: optional positive integer; defaults to the verification module's driven-project timeout when omitted.
 
-`pricing.codex` defaults to `{}`, so cost estimation can stay unavailable
-unless rates and `agents.codex.model` are configured. Cost control may have
-no effect until enough usage and outcome samples exist for its thresholds.
+Codex cost accounting is local estimate-only: `codex exec --json` token usage
+is priced from `pricing.codex` and `agents.codex.model`, and no provider-real
+Codex cost field is recorded without a confirmed JSONL schema. `pricing.codex`
+defaults to `{}`, so cost estimation can stay unavailable unless rates and
+`agents.codex.model` are configured. Cost control may have no effect until
+enough usage and outcome samples exist for its thresholds.
 `verification.driven_project_commands` defaults to `[]`; with no driven
 project checks configured, `driven_project_verified` is false and Stage 6
 auto-verification cannot qualify.
