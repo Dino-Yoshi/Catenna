@@ -68,6 +68,14 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(changed, [{"path": "tracked.txt", "reason": "reverted_to_clean_during_stage5"}])
 
+    def test_changed_files_reports_new_untracked_file_as_new_since_dirty_baseline(self):
+        baseline = capture_dirty_baseline(self.repo)
+        (self.repo / "new_file.txt").write_text("created after baseline\n", encoding="utf-8")
+
+        changed = changed_files_since(self.repo, baseline)
+
+        self.assertEqual(changed, [{"path": "new_file.txt", "reason": "new_since_dirty_baseline"}])
+
     def test_changed_files_reports_missing_baseline_path_as_deleted(self):
         baseline = {"captured_at": "now", "entries": ["?? gone.txt"], "hashes": {}}
 
