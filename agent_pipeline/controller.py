@@ -2,6 +2,8 @@
 
 from __future__ import print_function
 
+import calendar
+import copy
 import json
 import os
 import re
@@ -205,7 +207,7 @@ def list_tasks(plain=False):
     return EXIT_SUCCESS
 
 
-def pipeline_init(force=False):
+def pipeline_init(force=False, codex_model=None):
     tasks_existed = TASKS_ROOT.exists()
     usage_existed = USAGE_ROOT.exists()
     config_existed = config.CONFIG_PATH.exists()
@@ -214,7 +216,11 @@ def pipeline_init(force=False):
     USAGE_ROOT.mkdir(parents=True, exist_ok=True)
     config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    default_text = json.dumps(config.DEFAULT_CONFIG, indent=2, sort_keys=True) + "\n"
+    default_config = copy.deepcopy(config.DEFAULT_CONFIG)
+    if codex_model:
+        default_config["agents"]["codex"]["model"] = codex_model
+    default_text = json.dumps(default_config, indent=2, sort_keys=True) + "\n"
+    writing_defaults = not config_existed or force
     if not config_existed:
         config.CONFIG_PATH.write_text(default_text, encoding="utf-8")
         config_status = "created"
@@ -227,6 +233,21 @@ def pipeline_init(force=False):
     print("%s: %s" % (config.CONFIG_PATH, config_status))
     print("%s: %s" % (TASKS_ROOT, "exists" if tasks_existed else "created"))
     print("%s: %s" % (USAGE_ROOT, "exists" if usage_existed else "created"))
+
+    if writing_defaults:
+        if codex_model:
+            print(
+                "codex model set to %r, but pricing.%s is not configured -- "
+                "codex real-cost accounting will still show cost=unknown "
+                "until you add pricing.codex.%s rates to %s"
+                % (codex_model, codex_model, codex_model, config.CONFIG_PATH)
+            )
+        else:
+            print(
+                "warning: agents.codex.model and pricing.codex are unset -- "
+                "codex stages will show cost=unknown until you pass "
+                "--codex-model or edit %s directly" % config.CONFIG_PATH
+            )
 
     config.load_config()
     return EXIT_SUCCESS
@@ -252,6 +273,20 @@ def validate_mock_fixture(name, scenario):
                 raise ControllerError("mock fixture %s configures forbidden command: %s" % (name, command))
 
 
+def _cooldown_expired(reset_at):
+    """True only if reset_at parses and is in the past. Missing/unparseable
+    reset_at is treated conservatively as still-blocking (False), matching
+    usage._compute_expires_at's own fallback of assuming a cooldown is
+    still live rather than assuming it already lapsed."""
+    if not reset_at:
+        return False
+    try:
+        expires_at = calendar.timegm(time.strptime(str(reset_at), "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return False
+    return expires_at <= time.time()
+
+
 def status(task):
     task_dir = task_dir_for(task)
     try:
@@ -266,6 +301,10 @@ def status(task):
     print("completed_stages: %s" % ", ".join(state["completed_stages"]))
     if state.get("run_unavailable_agents"):
         print("run_unavailable_agents: " + json.dumps(state["run_unavailable_agents"], sort_keys=True))
+        if state["state"] == "blocked" and all(
+            _cooldown_expired(detail.get("reset_at")) for detail in state["run_unavailable_agents"].values()
+        ):
+            print("status_note: displayed state is stale -- all recorded agent cooldowns have expired; rerun to refresh")
     try:
         cooldowns = usage.load_cooldowns(cooldown_store_path())
         if cooldowns:
@@ -940,7 +979,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
 
 
 def invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=None, attempt_number=1, attempt_kind="normal", retry_reason="initial/no-retry", extra_context=None):
-    prompt_path = render_prompt(task_dir, state["task"], stage_key, pass_number)
+    prompt_path = render_prompt(task_dir, state["task"], stage_key, pass_number, config=config)
     if extra_context is not None:
         with open(str(prompt_path), "a", encoding="utf-8") as handle:
             handle.write("\n")

@@ -91,10 +91,10 @@ class ControllerReliabilityTests(unittest.TestCase):
             code = controller.pipeline_verify_background(task, run_build=run_build)
         return code, output.getvalue()
 
-    def capture_init(self, force=False):
+    def capture_init(self, force=False, codex_model=None):
         output = io.StringIO()
         with redirect_stdout(output):
-            code = controller.pipeline_init(force=force)
+            code = controller.pipeline_init(force=force, codex_model=codex_model)
         return code, output.getvalue()
 
     def default_config_text(self):
@@ -119,6 +119,45 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertIn("created", output)
             self.assertFalse(controller.current_task_path().exists())
             self.assertEqual(list(controller.TASKS_ROOT.iterdir()), [])
+
+    def test_pipeline_init_warns_when_codex_model_left_unset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+
+            code, output = self.capture_init()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertIn("agents.codex.model and pricing.codex are unset", output)
+            written = json.loads(config.CONFIG_PATH.read_text(encoding="utf-8"))
+            self.assertIsNone(written["agents"]["codex"]["model"])
+
+    def test_pipeline_init_codex_model_flag_sets_model_and_notes_pricing_gap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+
+            code, output = self.capture_init(codex_model="gpt-5-codex")
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            written = json.loads(config.CONFIG_PATH.read_text(encoding="utf-8"))
+            self.assertEqual(written["agents"]["codex"]["model"], "gpt-5-codex")
+            self.assertEqual(written["pricing"]["codex"], {})
+            self.assertIn("pricing.gpt-5-codex is not configured", output)
+            self.assertNotIn("agents.codex.model and pricing.codex are unset", output)
+            self.assertEqual(config.DEFAULT_CONFIG["agents"]["codex"]["model"], None)
+
+    def test_pipeline_init_no_codex_warning_when_config_already_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_init_roots(root)
+            config.CONFIG_PATH.parent.mkdir(parents=True)
+            config.CONFIG_PATH.write_text(json.dumps({"schema_version": 2, "timeout_seconds": 1234}) + "\n", encoding="utf-8")
+
+            code, output = self.capture_init()
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertNotIn("agents.codex.model and pricing.codex are unset", output)
 
     def test_pipeline_init_existing_config_is_unchanged_without_force(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1302,6 +1341,26 @@ class ControllerReliabilityTests(unittest.TestCase):
                 self.assertIn("Repository-analysis budget:", prompts.prompt_text(task_dir, "task", stage_key))
             self.assertNotIn("Repository-analysis budget:", prompts.prompt_text(task_dir, "task", "05"))
 
+    def test_stage5_prompt_renders_configured_verification_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "task"
+            config = {
+                "verification": {
+                    "driven_project_commands": [
+                        {"name": "pytest", "argv": [".venv/bin/pytest", "-q"]},
+                    ]
+                }
+            }
+            text = prompts.prompt_text(task_dir, "task", "05", config=config)
+            self.assertIn("pytest (.venv/bin/pytest -q)", text)
+            self.assertNotIn("commands available in the brief and repository", text)
+
+    def test_stage5_prompt_falls_back_without_configured_verification_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "task"
+            text = prompts.prompt_text(task_dir, "task", "05")
+            self.assertIn("Run the verification commands available in the brief and repository.", text)
+
     def test_pipeline_verify_treats_none_duration_as_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1628,6 +1687,42 @@ class ControllerReliabilityTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_SUCCESS)
             self.assertNotIn("cross_task_cooldowns:", output)
+
+    def test_status_flags_blocked_state_as_stale_once_cooldown_expired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+            task_dir = root / "status-stale-blocked-task"
+            task_dir.mkdir(parents=True)
+            state = new_state("status-stale-blocked-task")
+            state["state"] = "blocked"
+            state["run_unavailable_agents"] = {
+                "codex": {"reason": "usage_limit", "reset_at": "2000-01-01T00:00:00Z", "recorded_at": "2000-01-01T00:00:00Z", "run_id": "run-1"}
+            }
+            write_state_atomic(task_dir, state)
+
+            code, output = self.capture_status("status-stale-blocked-task")
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertIn("status_note: displayed state is stale", output)
+
+    def test_status_does_not_flag_blocked_state_as_stale_while_cooldown_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.with_tasks_root(root)
+            task_dir = root / "status-active-blocked-task"
+            task_dir.mkdir(parents=True)
+            state = new_state("status-active-blocked-task")
+            state["state"] = "blocked"
+            state["run_unavailable_agents"] = {
+                "codex": {"reason": "usage_limit", "reset_at": "2999-01-01T00:00:00Z", "recorded_at": "2000-01-01T00:00:00Z", "run_id": "run-1"}
+            }
+            write_state_atomic(task_dir, state)
+
+            code, output = self.capture_status("status-active-blocked-task")
+
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertNotIn("status_note: displayed state is stale", output)
 
     def test_status_never_raises_on_corrupt_cooldown_store(self):
         with tempfile.TemporaryDirectory() as tmp:
