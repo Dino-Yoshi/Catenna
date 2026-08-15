@@ -16,12 +16,21 @@ raising, since CLI JSON schemas can change across versions.
 from __future__ import print_function
 
 import json
+import re
+from datetime import datetime, timedelta, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - exercised only on Python < 3.9.
+    ZoneInfo = None
 
 from .failures import (
     FAILURE_CLASS_MAX_TURNS,
     FAILURE_CLASS_PROCESS_INTERRUPTED,
+    FAILURE_CLASS_RATE_LIMIT,
     FAILURE_CLASS_TIMEOUT,
     FAILURE_CLASS_UNKNOWN_FAILURE,
+    FAILURE_CLASS_USAGE_LIMIT,
 )
 
 
@@ -225,6 +234,22 @@ _AGY_STATUS_MAP = {
     "CANCELLED": FAILURE_CLASS_PROCESS_INTERRUPTED,
 }
 
+_USAGE_LIMIT_KEYWORDS = ("usage limit", "quota", "billing")
+_RATE_LIMIT_KEYWORDS = ("rate limit", "too many requests")
+_RESET_WITH_TIMEZONE_RE = re.compile(
+    r"\bresets?\s+([0-9]{1,2})(?::([0-9]{2}))?\s*([ap]m)?\s*\(([^)]+)\)",
+    re.IGNORECASE,
+)
+
+
+def usage_or_rate_failure(text):
+    lower = str(text or "").lower()
+    if any(keyword in lower for keyword in _USAGE_LIMIT_KEYWORDS):
+        return FAILURE_CLASS_USAGE_LIMIT
+    if any(keyword in lower for keyword in _RATE_LIMIT_KEYWORDS):
+        return FAILURE_CLASS_RATE_LIMIT
+    return None
+
 
 def structured_failure(agent, stdout_text, events=None):
     """Best-effort structured failure classification from a JSONL stream.
@@ -243,6 +268,13 @@ def structured_failure(agent, stdout_text, events=None):
         if agent == "claude":
             if obj.get("type") == "result":
                 subtype = obj.get("subtype")
+                if obj.get("api_error_status") == 429:
+                    result_text = str(obj.get("result") or "").lower()
+                    if "usage limit" in result_text or "session limit" in result_text:
+                        classification = FAILURE_CLASS_USAGE_LIMIT
+                    else:
+                        classification = FAILURE_CLASS_RATE_LIMIT
+                    continue
                 if obj.get("is_error") and subtype:
                     classification = _CLAUDE_ERROR_SUBTYPE_MAP.get(subtype, FAILURE_CLASS_UNKNOWN_FAILURE)
         elif agent == "agy":
@@ -256,8 +288,66 @@ def structured_failure(agent, stdout_text, events=None):
                 if "max" in reason and "turn" in reason:
                     classification = FAILURE_CLASS_MAX_TURNS
                 else:
-                    classification = FAILURE_CLASS_UNKNOWN_FAILURE
+                    classification = usage_or_rate_failure(reason) or FAILURE_CLASS_UNKNOWN_FAILURE
     return classification
+
+
+def reset_at(agent, stdout_text, events=None):
+    """Best-effort reset timestamp from structured stdout events.
+
+    Returns a UTC ``%Y-%m-%dT%H:%M:%SZ`` string only for explicit clock
+    time plus parenthesized IANA timezone text. Unknown shapes fail closed
+    with None.
+    """
+    events = _events(stdout_text, events)
+    if agent is None:
+        agent = detect_agent_from_stream(stdout_text, events=events)
+    if agent is None:
+        return None
+    for text in _reset_texts(agent, events):
+        parsed = _parse_reset_with_timezone(text)
+        if parsed:
+            return parsed
+    return None
+
+
+def _reset_texts(agent, events):
+    for obj in events:
+        if agent == "claude" and obj.get("type") == "result":
+            yield obj.get("result")
+        elif agent == "codex" and obj.get("type") == "turn.failed":
+            yield (obj.get("error") or {}).get("message")
+
+
+def _parse_reset_with_timezone(text):
+    if ZoneInfo is None:
+        return None
+    match = _RESET_WITH_TIMEZONE_RE.search(str(text or ""))
+    if not match:
+        return None
+    hour_text, minute_text, meridiem, timezone_name = match.groups()
+    try:
+        hour = int(hour_text)
+        minute = int(minute_text or "0")
+        if minute < 0 or minute > 59:
+            return None
+        if meridiem:
+            if hour < 1 or hour > 12:
+                return None
+            if meridiem.lower() == "pm" and hour != 12:
+                hour += 12
+            elif meridiem.lower() == "am" and hour == 12:
+                hour = 0
+        elif hour < 0 or hour > 23:
+            return None
+        tzinfo = ZoneInfo(timezone_name.strip())
+        now_local = datetime.now(tzinfo)
+        reset_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if reset_local <= now_local:
+            reset_local += timedelta(days=1)
+        return reset_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
 
 
 def summarize_event(agent, obj, verbose=False):
