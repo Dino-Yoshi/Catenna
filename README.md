@@ -41,16 +41,19 @@ in `.agent-pipeline/config/orchestrator.json`. See "Configuration" below.
 
 ## Install
 
-Not yet published to PyPI - install from source for now (it will publish
-as `catenna`):
+```bash
+pip install catenna
+```
+
+Or, to work on Catenna itself (editable install from source):
 
 ```bash
 git clone git@github.com:Dino-Yoshi/Catenna.git && cd Catenna
 pip install -e .
 ```
 
-This installs the `catenna` console script (`pyproject.toml`); the
-underlying package is `agent_pipeline`, invocable identically as
+Either way this installs the `catenna` console script (`pyproject.toml`);
+the underlying package is `agent_pipeline`, invocable identically as
 `python3 -m agent_pipeline.cli` if you ever need that form instead (some
 internal verification checks shell out to it that way).
 
