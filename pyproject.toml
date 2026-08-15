@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "catenna"
-version = "0.1.0"
+version = "1.0.0"
 description = "A deterministic multi-agent pipeline orchestrator for coding-agent CLIs"
 readme = "README.md"
 license = { file = "LICENSE" }
