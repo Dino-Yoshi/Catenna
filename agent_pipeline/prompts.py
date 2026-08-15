@@ -19,8 +19,8 @@ COMPAT_PROMPTS = {
 }
 
 
-def render_prompt(task_dir, task, stage_key, pass_number=1):
-    prompt = prompt_text(task_dir, task, stage_key)
+def render_prompt(task_dir, task, stage_key, pass_number=1, config=None):
+    prompt = prompt_text(task_dir, task, stage_key, config=config)
     prompt_dir = orchestrator_dir(task_dir) / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     path = prompt_dir / ("%s-pass-%s.txt" % (stage_key, pass_number))
@@ -30,7 +30,7 @@ def render_prompt(task_dir, task, stage_key, pass_number=1):
     return path
 
 
-def prompt_text(task_dir, task, stage_key):
+def prompt_text(task_dir, task, stage_key, config=None):
     paths = stage_paths(task_dir)
     if stage_key == "02":
         return lines(
@@ -217,6 +217,14 @@ def prompt_text(task_dir, task, stage_key):
             "Use ready_for_implementation: true only when the brief is aligned, concrete, internally consistent, repository-compatible, and safe to implement."
         )
     if stage_key == "05":
+        driven_project_commands = ((config or {}).get("verification", {}) or {}).get("driven_project_commands") or []
+        if driven_project_commands:
+            verification_line = "- Run the configured verification commands: " + ", ".join(
+                "%s (%s)" % (command.get("name"), " ".join(command.get("argv", [])))
+                for command in driven_project_commands
+            ) + "."
+        else:
+            verification_line = "- Run the verification commands available in the brief and repository."
         return lines(
             "Stage 5 of the multi-agent pipeline.",
             "",
@@ -234,7 +242,7 @@ def prompt_text(task_dir, task, stage_key):
             "- Do not perform unrelated refactors.",
             "- Preserve existing behavior unless the brief explicitly changes it.",
             "- Prefer minimal, maintainable changes compatible with the repository.",
-            "- Run the verification commands available in the brief and repository.",
+            verification_line,
             "- Stop and report rather than guessing when a stop condition is reached.",
             "",
             "Modify source files as required by the brief.",
