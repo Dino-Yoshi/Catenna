@@ -193,6 +193,44 @@ class ArtifactValidationTests(unittest.TestCase):
         gate = parse_gate(text)["gate"]
         self.assertEqual(gate["nonblocking_issues"], ['the value is "05" here, at file.py:12-19; note it.'])
 
+    def test_yaml_gate_accepts_code_punctuation_in_multiline_list_items(self):
+        text = gate_artifact(
+            "03",
+            "\n".join(
+                [
+                    "ready_for_implementation: true",
+                    "blocking_issues: []",
+                    "nonblocking_issues:",
+                    "  - foo(bar, baz=1)",
+                    "  - compare values[0] with map{key}=value",
+                    "required_revision_targets: []",
+                ]
+            ),
+        )
+
+        result = validate_text(text, CONTRACTS["03"])
+        self.assertTrue(result["valid"], result)
+        gate = parse_gate(text)["gate"]
+        self.assertEqual(gate["nonblocking_issues"][0], "foo(bar, baz=1)")
+        self.assertEqual(gate["nonblocking_issues"][1], "compare values[0] with map{key}=value")
+
+    def test_yaml_gate_rejects_inline_array_code_punctuation(self):
+        text = gate_artifact(
+            "03",
+            "\n".join(
+                [
+                    "ready_for_implementation: true",
+                    "blocking_issues: []",
+                    "nonblocking_issues: [foo(bar, baz=1)]",
+                    "required_revision_targets: []",
+                ]
+            ),
+        )
+
+        result = validate_text(text, CONTRACTS["03"])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "unsupported gate syntax")
+
     def test_yaml_gate_rejects_orphan_and_nested_list_syntax(self):
         orphan = gate_artifact(
             "03",
@@ -206,10 +244,15 @@ class ArtifactValidationTests(unittest.TestCase):
             "03",
             "ready_for_implementation: true\nblocking_issues:\n  - B1\n    detail\nnonblocking_issues: []\nrequired_revision_targets: []",
         )
+        nested_array = gate_artifact(
+            "03",
+            "ready_for_implementation: true\nblocking_issues:\n  - [B1, B2]\nnonblocking_issues: []\nrequired_revision_targets: []",
+        )
 
         self.assertFalse(validate_text(orphan, CONTRACTS["03"])["valid"])
         self.assertFalse(validate_text(object_like, CONTRACTS["03"])["valid"])
         self.assertFalse(validate_text(nested, CONTRACTS["03"])["valid"])
+        self.assertFalse(validate_text(nested_array, CONTRACTS["03"])["valid"])
 
 
 class ManualTestDecisionTests(unittest.TestCase):
