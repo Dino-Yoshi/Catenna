@@ -124,6 +124,7 @@ class StreamingRunnerTests(unittest.TestCase):
             assert running["run_id"] == "run-sidecar"
             assert isinstance(running["pid"], int)
             assert running["host"]
+            assert "reset_at" not in running
             with open(out_path, "w") as handle:
                 handle.write("codex final answer")
             print('{"type":"thread.started"}')
@@ -140,6 +141,31 @@ class StreamingRunnerTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(final["status"], "passed")
         self.assertEqual(final["run_id"], "run-sidecar")
+        self.assertIn("reset_at", final)
+        self.assertIsNone(final["reset_at"])
+
+    def test_claude_usage_limit_result_writes_reset_at_to_result_and_final_sidecar(self):
+        if real_runner.stream_events.ZoneInfo is None:
+            self.skipTest("zoneinfo unavailable")
+        fake = self.write_fake(
+            """
+            import sys
+            print('{"type":"system","subtype":"init"}')
+            print('{"type":"result","subtype":"success","is_error":true,"api_error_status":429,'
+                  '"result":"You have hit your session limit. It resets 11pm (America/Los_Angeles)."}')
+            sys.exit(1)
+            """
+        )
+        config = self.base_config("claude", fake)
+        candidate_path = self.task_dir / "04-pass-1-attempt-1-claude-run-reset.candidate.md"
+
+        result = invoke_agent(self.task_dir, config, "claude", "04", "read-only", self.prompt_path, candidate_path, "run-reset")
+
+        sidecar = candidate_path.parent / ".orchestrator" / "runs" / "04-pass-1-attempt-1-claude-run-reset.json"
+        final = json.loads(sidecar.read_text(encoding="utf-8"))
+        self.assertEqual(result["failure_class"], "usage_limit")
+        self.assertRegex(result["reset_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00Z$")
+        self.assertEqual(final["reset_at"], result["reset_at"])
 
     def test_plain_text_output_without_json_still_falls_back_to_raw_stdout(self):
         # An agent CLI that ignores the streaming flags (or a legacy

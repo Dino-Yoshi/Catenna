@@ -166,6 +166,32 @@ class StructuredFailureTests(unittest.TestCase):
     def test_codex_max_turns_failure(self):
         self.assertEqual(stream_events.structured_failure("codex", CODEX_MAX_TURNS_STREAM), "max_turns")
 
+    def test_claude_429_session_limit_is_usage_limit_before_subtype_fallback(self):
+        stdout = "\n".join(
+            [
+                '{"type":"system","subtype":"init"}',
+                '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,'
+                '"result":"You have hit your session limit. It resets 11pm (America/Los_Angeles)."}',
+            ]
+        )
+        self.assertEqual(stream_events.structured_failure("claude", stdout), "usage_limit")
+
+    def test_claude_429_without_usage_text_is_rate_limit(self):
+        stdout = '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"Requests are temporarily throttled."}'
+        self.assertEqual(stream_events.structured_failure("claude", stdout), "rate_limit")
+
+    def test_codex_usage_limit_failure_from_jsonl_stdout(self):
+        stdout = '{"type":"turn.failed","error":{"message":"You have hit your usage limit. Try again at 6:50 PM."}}'
+        self.assertEqual(stream_events.structured_failure("codex", stdout), "usage_limit")
+
+    def test_codex_rate_limit_failure_from_jsonl_stdout(self):
+        stdout = '{"type":"turn.failed","error":{"message":"Too many requests. Please retry later."}}'
+        self.assertEqual(stream_events.structured_failure("codex", stdout), "rate_limit")
+
+    def test_codex_max_turns_wins_over_usage_keywords(self):
+        stdout = '{"type":"turn.failed","error":{"message":"Reached maximum turns after a usage limit warning."}}'
+        self.assertEqual(stream_events.structured_failure("codex", stdout), "max_turns")
+
     def test_success_stream_has_no_failure(self):
         self.assertIsNone(stream_events.structured_failure("claude", CLAUDE_STREAM))
         self.assertIsNone(stream_events.structured_failure("agy", AGY_STREAM))
@@ -173,6 +199,23 @@ class StructuredFailureTests(unittest.TestCase):
 
     def test_plain_text_has_no_structured_failure(self):
         self.assertIsNone(stream_events.structured_failure(None, PLAIN_TEXT_STREAM))
+
+
+class ResetAtTests(unittest.TestCase):
+    def test_claude_timezone_reset_extracts_utc_timestamp_when_supported(self):
+        if stream_events.ZoneInfo is None:
+            self.skipTest("zoneinfo unavailable")
+        stdout = '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You have hit your session limit. It resets 11pm (America/Los_Angeles)."}'
+        reset_at = stream_events.reset_at("claude", stdout)
+        self.assertRegex(reset_at, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00Z$")
+
+    def test_codex_clock_without_date_or_timezone_returns_none(self):
+        stdout = '{"type":"turn.failed","error":{"message":"You have hit your usage limit. Try again at 6:50 PM."}}'
+        self.assertIsNone(stream_events.reset_at("codex", stdout))
+
+    def test_unknown_reset_text_returns_none(self):
+        stdout = '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"Try again later."}'
+        self.assertIsNone(stream_events.reset_at("claude", stdout))
 
 
 class SummarizeEventTests(unittest.TestCase):

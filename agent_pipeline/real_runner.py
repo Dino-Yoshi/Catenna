@@ -19,12 +19,10 @@ from .failures import (
     FAILURE_CLASS_MAX_TURNS,
     FAILURE_CLASS_PERMISSION_ERROR,
     FAILURE_CLASS_PROCESS_INTERRUPTED,
-    FAILURE_CLASS_RATE_LIMIT,
     FAILURE_CLASS_SANDBOX_ENVIRONMENT,
     FAILURE_CLASS_SOURCE_FAILURE,
     FAILURE_CLASS_TIMEOUT,
     FAILURE_CLASS_UNKNOWN_FAILURE,
-    FAILURE_CLASS_USAGE_LIMIT,
 )
 from .state import orchestrator_dir
 
@@ -141,6 +139,7 @@ def invoke_agent(
     events = stream_events.parse_json_lines(stdout_text)
     if failure_class is None:
         failure_class = classify(exit_code, stdout_text, stderr_text, agent, events=events)
+    reset_at = stream_events.reset_at(agent, stdout_text, events=events)
     if failure_class in (FAILURE_CLASS_MAX_TURNS, FAILURE_CLASS_PROCESS_INTERRUPTED, FAILURE_CLASS_TIMEOUT):
         partial = True
 
@@ -179,6 +178,7 @@ def invoke_agent(
         "candidate_artifact_path": str(extracted_path),
         "turn_budget": int(config.get("turn_budgets", {}).get(stage_key, 20)),
         "failure_class": failure_class,
+        "reset_at": reset_at,
         "partial": partial,
         "real_process_invoked": real_process_invoked,
         "run_id": run_id,
@@ -348,10 +348,9 @@ def classify(exit_code, stdout_text, stderr_text, agent=None, events=None):
     fallback = stderr_text.lower()
     if "max turns" in fallback or "maximum turns" in fallback or "turn limit" in fallback:
         return FAILURE_CLASS_MAX_TURNS
-    if "usage limit" in fallback or "quota" in fallback or "billing" in fallback:
-        return FAILURE_CLASS_USAGE_LIMIT
-    if "rate limit" in fallback or "too many requests" in fallback:
-        return FAILURE_CLASS_RATE_LIMIT
+    usage_or_rate = stream_events.usage_or_rate_failure(fallback)
+    if usage_or_rate:
+        return usage_or_rate
     if "permission denied" in fallback or "operation not permitted" in fallback:
         return FAILURE_CLASS_PERMISSION_ERROR
     if "sandbox" in fallback:
