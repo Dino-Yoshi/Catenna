@@ -2,7 +2,7 @@ from __future__ import print_function
 
 import unittest
 
-from agent_pipeline.artifacts import CONTRACTS, manual_test_decision, parse_gate, validate_text
+from agent_pipeline.artifacts import CONTRACTS, explicit_manual_outcome, manual_test_decision, parse_gate, validate_text
 from agent_pipeline.mock_agent import gate_artifact, valid_artifact
 
 
@@ -247,6 +247,31 @@ class ManualTestDecisionTests(unittest.TestCase):
     def test_prose_reject_wins_over_needs_followup_mentioned_together(self):
         text = self.section("Needs follow-up on docs, but the core change is broken and blocked from merging.")
         self.assertEqual(manual_test_decision(text), "reject")
+
+    def test_accepting_prose_allows_incidental_negative_words(self):
+        cases = [
+            "Accepted. The error path fails cleanly with a clear message.",
+            "Approved. No follow-up needed.",
+            "Manual testing passed. The previously blocked case is now handled.",
+        ]
+        for body in cases:
+            text = self.section(body)
+            self.assertTrue(validate_text(text, CONTRACTS["06"])["valid"], body)
+            self.assertEqual(manual_test_decision(text), "accept", body)
+
+    def test_incidental_only_negative_words_are_not_explicit_outcomes(self):
+        cases = [
+            "The error path fails cleanly with a clear message.",
+            "No follow-up needed.",
+            "The previously blocked case is now handled.",
+        ]
+        for body in cases:
+            text = self.section(body)
+            result = validate_text(text, CONTRACTS["06"])
+            self.assertFalse(result["valid"], body)
+            self.assertEqual(result["reason"], "manual test notes must state an explicit outcome")
+            self.assertIsNone(manual_test_decision(text), body)
+            self.assertFalse(explicit_manual_outcome(body), body)
 
     def test_overall_manual_result_heading_variant(self):
         text = "# Stage 6 - Manual test notes\n\n## Overall manual result\n\n- [x] Accept\n"
