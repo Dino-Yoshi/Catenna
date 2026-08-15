@@ -459,6 +459,178 @@ is safe by construction (see "State machine" above).
 
 ## Changelog
 
+- **Retry/rate-limit hardening pass** (2026-08-15, branch `v10-retry-hardening`):
+  two fixes grounded in real failures captured during a 20-task benchmark
+  run against a separate driven project. (1) Real codex/claude rate-limit
+  messages were falling to `unknown_failure` instead of
+  `FAILURE_CLASS_USAGE_LIMIT`/`FAILURE_CLASS_RATE_LIMIT` — new shared
+  `stream_events.usage_or_rate_failure(text)` keyword classifier, reused by
+  both `real_runner.classify()`'s stderr fallback and
+  `stream_events.structured_failure()`'s new branches (claude's
+  `api_error_status == 429`, agy's non-max-turns failure reason). New
+  `stream_events.reset_at(agent, stdout_text, events=None)` parses a
+  `"resets HH:MM(am/pm) (TZ_NAME)"`-shaped message from claude's `result`
+  field or codex's `turn.failed` error into a UTC timestamp via
+  `zoneinfo.ZoneInfo`, failing closed (`None`) on any unparseable shape;
+  `real_runner.invoke_agent` now surfaces it in the result dict and metadata
+  sidecar. (2) Stage `03`/`04_gate` prompts gained a line instructing agents
+  to double-quote every `blocking_issues`/`nonblocking_issues`/
+  `required_revision_targets` list item, including items that look safe
+  unquoted — a guardrail against the strict gate-YAML parser rejecting
+  ordinary punctuation, the same parser class of issue the prior pass's
+  charset widening (below) had already partially addressed. 510 → 520 tests.
+- **P0/P1/P5.2 bugfix pass** (2026-08-15, branch `bugfix-p0-p1-p5.2`,
+  folding in `bugfix-p3-p6.4`'s tip commit, which landed directly in this
+  branch's history rather than as its own merge): three bugs from
+  `bugs.md`. **P0** — `reconcile_artifacts()` was unconditionally
+  overwriting `state["input_hashes"]` on every call, which could silently
+  self-heal a real staleness signal mid-run before Stage 07 was ever
+  (re-)dispatched (multiple `reconcile_artifacts` calls per
+  `run_real_pipeline` invocation). Fixed via a new
+  `state.STAGE_CONSUMED_INPUTS` map and
+  `state.acknowledge_consumed_inputs(task_dir, state, stage_key)`, called
+  from every real stage-success path; `reconcile_artifacts` now only
+  overwrites `input_hashes` on non-read-only calls when nothing was
+  invalidated. **P1** — `04_gate` attempt-budget exhaustion on non-code
+  failures: `artifacts.parse_string`'s unquoted-scalar charset widened to
+  accept `(){}[],=` (with new rejections for genuinely malformed shapes),
+  reducing false-positive `malformed_artifact` classifications on
+  ordinary code-snippet punctuation in gate YAML; a related plan-mode
+  redirect investigation was explicitly left unresolved pending real
+  authenticated CLI fixtures. **P5.2** — codex's raw `total_cost_usd`
+  field is now explicitly never trusted (`stream_events._normalize_usage`
+  gained `allow_raw_total_cost`, codex's call site passes `False`),
+  formalizing "estimate-only" instead of guessing at an unconfirmed field
+  name; documented in both this file and USAGE.md. Also folded in from
+  `bugfix-p3-p6.4`: Stage 6→8 manual-test-notes prose classification
+  hardened (`artifacts.py`'s `manual_test_decision` rewritten around
+  sentence/semicolon-unit parsing with negation handling, e.g. "no
+  follow-up needed"); `verification.test_coverage_delta_signal` made
+  diff-aware (AST/tokenize-based for Python, regex-based for Java) to stop
+  flagging non-executable (comment/docstring-only) deltas or changes
+  already covered by an untouched test; `manifest.changed_files_since`'s
+  `"absent_before_present_after"` reason renamed to
+  `"new_since_dirty_baseline"`; `tail.follow()` gained a 5s initial grace
+  wait for a backgrounded run's first `.stdout` to appear; `catenna init`
+  gained `--codex-model`. 467 → 510 tests (across both branches).
+- **Usage docs pass** (2026-08-13, branch `usage-docs`): docs-only. New
+  `docs/USAGE.md` (operator/overseer guide: quickstart, task lifecycle,
+  full command table, state-troubleshooting table, full config reference,
+  self-hosting workflow) recommending `--background` + `tail` from the
+  first invocation rather than foreground-first-then-background. This
+  file's stage-artifact table gained a "Written by" column; `CLAUDE.md`
+  gained a pointer to USAGE.md. No test-count change.
+- **`init` command pass** (2026-08-13, branch `init-command`): new
+  `controller.pipeline_init(force=False)` — idempotently scaffolds
+  `TASKS_ROOT`/`USAGE_ROOT`/`config.CONFIG_PATH`, writing
+  `DEFAULT_CONFIG` as pretty-printed JSON and round-tripping it through
+  `config.load_config()` to fail fast on invalid output; `--force`
+  overwrites an existing config with defaults. New `catenna init
+  [--force]` subcommand. 470 → 481 tests.
+- **Codex cost-visibility pass** (2026-08-12, branch
+  `v9-codex-cost-visibility`): small follow-up to `v7` below.
+  `pipeline_usage` now warns when `agents.codex.model` is unset but codex
+  ledger entries exist ("codex cost tracking and model attribution are
+  disabled..."); `usage.estimate_cost_usd` gained a doc comment stating
+  its flat-rate model doesn't account for tiered/long-context pricing
+  (documented limitation, not a fix); `verification.check_concurrency_guard`'s
+  docstring corrected to describe both real callers. 467 → 470 tests.
+- **v8 hardening pass** (2026-08-12, branch `v8-hardening`): six
+  independent fixes, no single task spec (grounded from commits/diffs).
+  `cost_control.eligible_stages` validation now rejects entries outside
+  `cost_policy.ALLOWED_STAGES`, not just entries missing a `roles` entry.
+  `run_stage4_gate_loop`'s identical-resubmission guard
+  (`previous_rejection`) moved from a loop-local variable into persisted
+  `state["stage4_previous_rejection"]`, surviving a resumed mid-gate-loop
+  run. `usage._accumulate` guards cost accumulation against `bool` values
+  (a `bool` is an `int` subclass in Python). `real_runner.invoke_agent`'s
+  subprocess-launch `OSError` handler now branches on `errno`
+  (`EACCES`/`EPERM` → permission-error failure class/exit 126; otherwise
+  source-failure/exit 127) instead of always assuming a permission error.
+  `tail._advance_or_stop` reports `CorruptState` as `"blocked"`, not
+  `"complete"`. `locking.explicit_unlock` now checks `pid_live()` for the
+  recorded lock-holder and refuses to unlock if that PID is confirmed
+  live or liveness is uncertain. Also: `pipeline_verify` now holds its own
+  `TaskLock`; `ensure_real_stage`'s attempt-budget counter persists across
+  a resumed dispatch instead of resetting; `pipeline_usage`'s overall line
+  gained a `tokens=` figure it was previously missing. 460 → 467 tests.
+- **Codex cost/usage signal pass** (2026-08-12, branch `v7`): grew out of
+  a live investigation that found every one of codex's real ledger
+  entries had `total_cost_usd: null` — codex is primary for 5 of 6 real
+  stages, blocking any cost-effectiveness read on `v4`-`v6`'s policy for
+  most of the pipeline. New `config.py` `pricing.codex` block (per-model
+  token rates, validated by `validate_pricing_config`) and
+  `usage.estimate_cost_usd(usage_data, model, codex_price_table)` — a
+  flat per-token-rate estimate, explicitly documented as not modeling
+  tiered/long-context pricing thresholds. `stream_events._normalize_usage`
+  gained `cache_read_field`/`cache_creation_field` params so codex's real
+  field names (`cached_input_tokens`/`cache_write_input_tokens`, confirmed
+  against a real captured transcript) map into the same ledger slots
+  claude already used — previously silently discarded, meaning `v3`'s
+  `cache_hit_ratio` was meaningless for every codex stage. New
+  `total_cost_usd_estimated`/`cost_estimated_known` ledger-bucket fields,
+  printed as a separate `cost_estimated=$NN.NNNN` figure in `pipeline_usage`
+  alongside the real `cost=` figure — deliberately never merged into the
+  real field, so an estimate can't masquerade as a billed number.
+  Explicitly deferred: capturing `reasoning_output_tokens`. 442 → 460 tests.
+- **Quality-aware cost-control veto** (2026-08-11, branch `v6`): extends
+  `v4`/`v5`'s reliability-only downgrade veto with a quality signal from
+  `04_gate`'s own accept/reject outcomes. New `cost_control.quality_aware`
+  (default `False`) and `cost_control.max_rejection_rate` (default `0.2`)
+  config fields. New Layer 3 append-only store, `usage/outcomes.jsonl`
+  (`usage.build_outcome_entry`), written from `gates.run_stage4_gate_loop`
+  only when the gate is structurally valid and both `outcome_ledger_path`
+  and `quality_aware` are set; write failures fail soft, logged via
+  `stage4_quality_outcome_write_failed` rather than raised. New
+  `finalized_stage4_producer(task_dir, state, pass_number)` attributes an
+  outcome to the agent/model that actually produced the *finalized* brief
+  (hash-matched against `state["real_stage_runs"]["04"]`), no-oping on an
+  unattributed producer rather than guessing. `cost_policy.py` gained
+  `_candidate_confirmed_quality_safe` (stage-`"04"`-only; defers to `True`
+  below `min_samples`; else checks rejection rate against
+  `max_rejection_rate`), ANDed into `compute_stage_overrides`'s existing
+  checks — veto-only, never independently approves a downgrade the other
+  checks would reject. `quality_aware: false` remains a true no-op even
+  with `cost_control.enabled: true`. 425 → 442 tests.
+- **Cost-policy candidate-history veto** (2026-08-11, branch `v5`):
+  closes the loop `v4` deliberately deferred — a downgraded candidate's
+  own track record now matters, not just the baseline agent's reliability.
+  `cost_policy.py`-only change (confirmed no `controller.py`/
+  `real_runner.py` touch needed). New
+  `_candidate_confirmed_safe(config, stage_key, ledger_entries, agent,
+  candidate_model)`: filters ledger entries to the exact stage/agent/
+  candidate-model combination; below `min_samples` defers to the baseline
+  check; otherwise applies the same reliability bar. `_stage_eligible`
+  now excludes candidate-model-tagged entries from the baseline pool, so
+  "baseline reliable" means "reliable when not already downgraded," not
+  conflated with the candidate's own history. Shared threshold logic
+  factored into `_history_reliable`/`_rate_below_threshold`, reused by
+  both checks. `compute_stage_overrides` now requires both to pass.
+  Reconfiguring the candidate model string starts its track record from
+  zero — old-candidate history doesn't leak into a new candidate's
+  eligibility, tested explicitly. No new config knobs. 418 → 425 tests.
+- **Overseer-driven per-stage cost policy** (2026-08-11, branch `v4`): new
+  `agent_pipeline/cost_policy.py` (`compute_stage_overrides`,
+  `_effective_candidate`, `_stage_eligible`) — a pure, deterministic
+  (no agent call) per-run downgrade planner. New `config.py` `cost_control`
+  block (`enabled` default `False`, `min_samples`=5, `max_retry_rate`=0.2,
+  `eligible_stages`, `downgrade_candidates`), validated via
+  `validate_cost_control_config`. `usage.build_entry` gained
+  `model`/`pass_number`/`attempt_number`/`retry_reason` fields (additive).
+  Eligibility requires a minimum sample count, retry rate under threshold,
+  zero non-null `failure_class`, and a configured non-null downgrade
+  candidate for that agent; never upgrades; a static
+  `role.model_override`/`effort_override` always wins and excludes that
+  stage from cost-policy consideration. Stages `05` and `overseer` are
+  permanently ineligible. Real controller wiring computes
+  `state["stage_overrides"]` once per run, then merges the matching
+  override into a fresh per-dispatch `dispatch_config` inside
+  `ensure_real_stage` (via `merge_matching_stage_override_into_config`/
+  `merge_stage_override_into_config`, both building fresh
+  `dict`/`roles` copies rather than mutating the shared base config) right
+  before each `invoke_stage` call. `cost_control.enabled: false` is a true
+  no-op, covered by an explicit regression test. Deferred to `v5`: closing
+  the loop on the downgrade candidate's own track record. 398 → 418 tests.
 - **Usage/cost-control pass** (2026-08-09, branch `v3`): five features
   targeting repetitive/redundant agent invocations and per-stage model/
   effort control, restructured from a code-only investigation in
