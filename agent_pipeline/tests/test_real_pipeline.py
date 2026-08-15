@@ -700,6 +700,35 @@ class RealPipelineTests(unittest.TestCase):
         stage08 = (self.task_dir / CONTRACTS["08"].filename).read_text(encoding="utf-8")
         self.assertIn("- [x] Accept", stage08)
 
+    def test_manual_stage6_resume_acknowledges_stage05_input_before_stage08(self):
+        code = controller.pipeline_run(self.task, allow_dirty=True)
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertEqual(load_state(self.task_dir, self.task)["state"], "awaiting_human_test")
+
+        (self.task_dir / CONTRACTS["06"].filename).write_text(
+            "# Stage 6 - Manual test notes\n\n## Decision\n\n- [x] Accept\n- [ ] Reject\n- [ ] Needs follow-up\n",
+            encoding="utf-8",
+        )
+
+        captured = {}
+        original_ensure_stage08_decision = controller.ensure_stage08_decision
+
+        def spy(task_dir, state):
+            captured["input_hashes"] = dict(state.get("input_hashes") or {})
+            return original_ensure_stage08_decision(task_dir, state)
+
+        controller.ensure_stage08_decision = spy
+        self.addCleanup(lambda: setattr(controller, "ensure_stage08_decision", original_ensure_stage08_decision))
+
+        code = controller.pipeline_run(self.task, allow_dirty=True)
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertIn(CONTRACTS["05"].filename, captured["input_hashes"])
+        self.assertEqual(
+            captured["input_hashes"][CONTRACTS["05"].filename],
+            controller.sha256_file(self.task_dir / CONTRACTS["05"].filename),
+        )
+
     def test_needs_followup_stage7_verdict_yields_combined_needs_followup(self):
         (self.task_dir / CONTRACTS["06"].filename).write_text(
             "# Stage 6 - Manual test notes\n\n## Decision\n\n- [x] Accept\n- [ ] Reject\n- [ ] Needs follow-up\n",
