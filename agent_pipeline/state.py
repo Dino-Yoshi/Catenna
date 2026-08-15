@@ -40,6 +40,17 @@ STATE_KEYS = [
 
 STAGE_ORDER = ["00", "01", "02", "03", "04", "04_gate", "05", "06", "07", "08"]
 
+STAGE_CONSUMED_INPUTS = {
+    "02": ["00", "01"],
+    "03": ["02"],
+    "04": ["03"],
+    "04_gate": ["04"],
+    "05": ["04_gate"],
+    "06": ["05"],
+    "07": ["06"],
+    "08": ["07"],
+}
+
 
 class CorruptState(Exception):
     pass
@@ -180,7 +191,11 @@ def reconcile_artifacts(task_dir, state, read_only=False):
     effectively_valid = [key for key in structurally_valid if key not in invalidated]
     completed = contiguous_completed(effectively_valid)
     state["artifact_status"] = artifact_status
-    state["input_hashes"] = current_hashes
+    if not read_only:
+        if invalidated:
+            state["input_hashes"] = previous_hashes
+        elif not previous_hashes or stale_from or set(completed) == set(STAGE_ORDER):
+            state["input_hashes"] = current_hashes
     state["completed_stages"] = completed
     state["current_stage"] = next_stage(completed)
     if state["current_stage"] is None:
@@ -188,6 +203,20 @@ def reconcile_artifacts(task_dir, state, read_only=False):
     elif state.get("state") == "complete":
         state["state"] = "ready"
     return invalidated
+
+
+def acknowledge_consumed_inputs(task_dir, state, stage_key):
+    acknowledged = []
+    input_hashes = dict(state.get("input_hashes") or {})
+    for consumed_stage in STAGE_CONSUMED_INPUTS.get(stage_key, []):
+        contract = CONTRACTS[consumed_stage]
+        path = task_dir / contract.filename
+        if not path.exists():
+            continue
+        input_hashes[contract.filename] = sha256_file(path)
+        acknowledged.append(consumed_stage)
+    state["input_hashes"] = input_hashes
+    return acknowledged
 
 
 def contiguous_completed(valid_stage_keys):
