@@ -599,7 +599,10 @@ def parse_scalar_or_array(value):
             return []
         items = []
         for part in inner.split(","):
-            parsed = parse_string(part.strip())
+            item = part.strip()
+            if not is_quoted(item) and re.search(r"[()\{\}\[\]=]", item):
+                return _INVALID
+            parsed = parse_string(item)
             if parsed is _INVALID:
                 return _INVALID
             items.append(parsed)
@@ -610,8 +613,11 @@ def parse_scalar_or_array(value):
 def parse_list_item(value):
     if value == "" or value.startswith("-"):
         return _INVALID
-    if not is_quoted(value) and ":" in value:
-        return _INVALID
+    if not is_quoted(value):
+        if ":" in value:
+            return _INVALID
+        if value.startswith("[") or value.startswith("{"):
+            return _INVALID
     return parse_string(value)
 
 
@@ -626,7 +632,7 @@ def parse_string(value):
     match = _DOUBLE_QUOTED_RE.match(value) or _SINGLE_QUOTED_RE.match(value)
     if match:
         return _ESCAPE_RE.sub(r"\1", match.group(1))
-    if re.match(r"^[A-Za-z0-9_ ./#:-]+$", value):
+    if re.match(r"^[A-Za-z0-9_ ./#:()\{\}\[\],=-]+$", value):
         return value
     return _INVALID
 
