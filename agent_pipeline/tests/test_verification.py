@@ -3,6 +3,7 @@ from __future__ import print_function
 import json
 import os
 import socket
+import subprocess
 import tempfile
 import textwrap
 import time
@@ -140,6 +141,234 @@ class TestCoverageDeltaSignalTests(unittest.TestCase):
         signal = verification.test_coverage_delta_signal(manifest)
         self.assertEqual(signal["status"], "ok")
         self.assertEqual(signal["testable_changed_paths"], [])
+
+
+class TestCoverageDeltaGitAnalysisTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.git("init")
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "user.name", "Test User")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        return subprocess.check_output(["git"] + list(args), cwd=str(self.repo))
+
+    def write(self, path, text):
+        full = self.repo / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
+        return full
+
+    def commit_file(self, path, text):
+        self.write(path, text)
+        self.git("add", path)
+        self.git("commit", "-m", "commit " + path)
+
+    def coverage_signal(self, path, reason="new_since_dirty_baseline"):
+        manifest = {"changed_files": [{"path": path, "reason": reason}]}
+        return verification.test_coverage_delta_signal(manifest, repo_root=self.repo)
+
+    def test_tracked_staged_docstring_and_comment_only_python_change_is_ok(self):
+        self.commit_file(
+            "agent_pipeline/example.py",
+            '''
+            def calculate_total(value):
+                """
+                Old doc.
+                """
+                return value + 1
+            ''',
+        )
+        self.write(
+            "agent_pipeline/example.py",
+            '''
+            def calculate_total(value):
+                """
+                Updated doc.
+                Still documentation only.
+                """
+                # clearer implementation note
+                return value + 1
+            ''',
+        )
+        self.git("add", "agent_pipeline/example.py")
+
+        signal = self.coverage_signal("agent_pipeline/example.py")
+
+        self.assertEqual(signal["status"], "ok")
+        self.assertEqual(signal["flagged_paths"], [])
+
+    def test_java_comment_only_change_is_ok(self):
+        self.commit_file(
+            "src/main/java/com/example/Thing.java",
+            '''
+            package com.example;
+            public class Thing {
+                public int size() {
+                    return 1;
+                }
+            }
+            ''',
+        )
+        self.write(
+            "src/main/java/com/example/Thing.java",
+            '''
+            package com.example;
+            /**
+             * Current size holder.
+             */
+            public class Thing {
+                // stable value
+                public int size() {
+                    return 1;
+                }
+            }
+            ''',
+        )
+
+        signal = self.coverage_signal("src/main/java/com/example/Thing.java")
+
+        self.assertEqual(signal["status"], "ok")
+        self.assertEqual(signal["flagged_paths"], [])
+
+    def test_tracked_source_change_referenced_by_untouched_test_is_ok(self):
+        self.commit_file(
+            "agent_pipeline/example.py",
+            '''
+            def calculate_total(value):
+                return value + 1
+            ''',
+        )
+        self.commit_file(
+            "agent_pipeline/tests/test_example.py",
+            '''
+            from agent_pipeline.example import calculate_total
+
+            def test_calculate_total():
+                assert calculate_total(1) == 2
+            ''',
+        )
+        self.write(
+            "agent_pipeline/example.py",
+            '''
+            def calculate_total(value):
+                return value + 2
+            ''',
+        )
+
+        signal = self.coverage_signal("agent_pipeline/example.py")
+
+        self.assertEqual(signal["status"], "ok")
+        self.assertEqual(signal["flagged_paths"], [])
+
+    def test_tracked_non_docstring_string_literal_content_change_is_flagged(self):
+        self.commit_file(
+            "agent_pipeline/example.py",
+            '''
+            MESSAGE = ("old part " "second old part")
+
+            def calculate_total(value):
+                return value + 1
+            ''',
+        )
+        self.write(
+            "agent_pipeline/example.py",
+            '''
+            MESSAGE = ("old part " "second NEW part with different behavior text")
+
+            def calculate_total(value):
+                return value + 1
+            ''',
+        )
+
+        signal = self.coverage_signal("agent_pipeline/example.py")
+
+        self.assertEqual(signal["status"], "flagged")
+        self.assertEqual(signal["flagged_paths"], ["agent_pipeline/example.py"])
+
+    def test_tracked_source_pure_removal_is_ok(self):
+        self.commit_file(
+            "agent_pipeline/example.py",
+            '''
+            def calculate_total(value):
+                unused = value * 10
+                return value + 1
+            ''',
+        )
+        self.write(
+            "agent_pipeline/example.py",
+            '''
+            def calculate_total(value):
+                return value + 1
+            ''',
+        )
+
+        signal = self.coverage_signal("agent_pipeline/example.py")
+
+        self.assertEqual(signal["status"], "ok")
+        self.assertEqual(signal["flagged_paths"], [])
+
+    def test_untracked_executable_source_without_tests_remains_flagged(self):
+        self.write(
+            "agent_pipeline/new_feature.py",
+            '''
+            def calculate_total(value):
+                return value + 1
+            ''',
+        )
+
+        signal = self.coverage_signal("agent_pipeline/new_feature.py")
+
+        self.assertEqual(signal["status"], "flagged")
+        self.assertEqual(signal["flagged_paths"], ["agent_pipeline/new_feature.py"])
+
+    def test_untracked_executable_source_remains_flagged_for_hash_changed_reason(self):
+        self.write(
+            "agent_pipeline/sneaky.py",
+            '''
+            def do_dangerous_thing(x):
+                return x.execute_untested_path()
+            ''',
+        )
+
+        signal = self.coverage_signal("agent_pipeline/sneaky.py", reason="pre_dirty_hash_changed_during_stage5")
+
+        self.assertEqual(signal["status"], "flagged")
+        self.assertEqual(signal["flagged_paths"], ["agent_pipeline/sneaky.py"])
+
+    def test_untracked_executable_source_remains_flagged_for_status_changed_reason(self):
+        self.write(
+            "agent_pipeline/sneaky2.py",
+            '''
+            def do_dangerous_thing(x):
+                return x.execute_untested_path()
+            ''',
+        )
+
+        signal = self.coverage_signal("agent_pipeline/sneaky2.py", reason="status_changed_after_stage5")
+
+        self.assertEqual(signal["status"], "flagged")
+        self.assertEqual(signal["flagged_paths"], ["agent_pipeline/sneaky2.py"])
+
+    def test_deleted_and_reverted_paths_are_exempted(self):
+        deleted = self.coverage_signal("agent_pipeline/gone.py", reason="deleted_during_stage5")
+        reverted = self.coverage_signal("agent_pipeline/example.py", reason="reverted_to_clean_during_stage5")
+
+        self.assertEqual(deleted["status"], "ok")
+        self.assertEqual(reverted["status"], "ok")
+
+    def test_ambiguous_manifest_reason_preserves_flag(self):
+        self.commit_file("agent_pipeline/example.py", "def calculate_total(value):\n    return value + 1\n")
+        self.write("agent_pipeline/example.py", "def calculate_total(value):\n    return value + 2\n")
+
+        signal = self.coverage_signal("agent_pipeline/example.py", reason="legacy_unknown")
+
+        self.assertEqual(signal["status"], "flagged")
+        self.assertIn("ambiguous", signal["note"])
 
 
 class UpdateManifestVerificationTests(unittest.TestCase):
