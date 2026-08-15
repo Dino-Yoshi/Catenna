@@ -180,13 +180,24 @@ class CliParserTests(unittest.TestCase):
     def test_init_calls_controller_pipeline_init(self):
         calls = []
         original = cli.controller.pipeline_init
-        cli.controller.pipeline_init = lambda force=False: calls.append(force) or EXIT_SUCCESS
+        cli.controller.pipeline_init = lambda force=False, codex_model=None: calls.append((force, codex_model)) or EXIT_SUCCESS
         self.addCleanup(lambda: setattr(cli.controller, "pipeline_init", original))
 
         code = cli.main(["init", "--force"])
 
         self.assertEqual(code, EXIT_SUCCESS)
-        self.assertEqual(calls, [True])
+        self.assertEqual(calls, [(True, None)])
+
+    def test_init_passes_codex_model_through(self):
+        calls = []
+        original = cli.controller.pipeline_init
+        cli.controller.pipeline_init = lambda force=False, codex_model=None: calls.append((force, codex_model)) or EXIT_SUCCESS
+        self.addCleanup(lambda: setattr(cli.controller, "pipeline_init", original))
+
+        code = cli.main(["init", "--codex-model", "gpt-5-codex"])
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(calls, [(False, "gpt-5-codex")])
 
     def test_tasks_plain_flag_parses(self):
         parser = cli.build_parser()

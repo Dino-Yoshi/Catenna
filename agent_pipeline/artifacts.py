@@ -372,7 +372,7 @@ def validate_manual_test_outcome(text):
         if not line or re.match(r"^[-*+]\s*\[[ xX]\]\s+", line):
             continue
         prose_lines.append(line)
-    prose = " ".join(prose_lines)
+    prose = "\n".join(prose_lines)
     if explicit_manual_outcome(prose):
         return {"valid": True, "reason": "valid"}
     return {
@@ -403,14 +403,64 @@ def manual_test_decision(text):
         if not line or re.match(r"^[-*+]\s*\[[ xX]\]\s+", line):
             continue
         prose_lines.append(line)
-    prose = " ".join(prose_lines)
-    if re.search(r"\breject(?:ed|s)?\b|\bfail(?:ed|s)?\b|\bblocked\b", prose, re.I):
+    return _manual_outcome_from_prose("\n".join(prose_lines))
+
+
+def _manual_outcome_from_prose(prose):
+    outcomes = set()
+    for unit in _manual_outcome_units(prose):
+        if _unit_has_reject_outcome(unit):
+            outcomes.add("reject")
+        if _unit_has_followup_outcome(unit):
+            outcomes.add("needs_followup")
+        if _unit_has_accept_outcome(unit):
+            outcomes.add("accept")
+    if "reject" in outcomes:
         return "reject"
-    if re.search(r"\bneeds?\s+follow[- ]?up\b|\bfollow[- ]?up\s+required\b", prose, re.I):
+    if "needs_followup" in outcomes:
         return "needs_followup"
-    if re.search(r"\baccept(?:ed|s)?\b|\bpass(?:ed|es)?\b|\bapproved\b", prose, re.I):
+    if "accept" in outcomes:
         return "accept"
     return None
+
+
+def _manual_outcome_units(prose):
+    units = []
+    for raw_line in (prose or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = re.split(r"(?<=[.!?])\s+|;\s+", line)
+        units.extend(part.strip() for part in parts if part.strip())
+    return units
+
+
+def _unit_has_reject_outcome(unit):
+    text = unit.lower()
+    if re.search(r"\breject(?:ed|s)?\b", text):
+        return True
+    if re.search(r"\bmanual testing failed\b|\btesting failed\b|\bfailed in (?:manual )?testing\b", text):
+        return True
+    if re.search(r"\bblocked\s+(?:from merging|pending\b)", text):
+        return True
+    return False
+
+
+def _unit_has_followup_outcome(unit):
+    text = unit.lower()
+    if re.search(r"\bno\s+follow[- ]?up\s+(?:needed|required)\b", text):
+        return False
+    return bool(
+        re.search(
+            r"\bneeds?\s+follow[- ]?up\b|\bfollow[- ]?up\s+required\b|\brequires?\s+follow[- ]?up\b",
+            text,
+        )
+    )
+
+
+def _unit_has_accept_outcome(unit):
+    text = unit.lower()
+    return bool(re.search(r"\baccept(?:ed|s)?\b|\bapproved\b|\bpass(?:ed|es)?\b", text))
 
 
 def extract_last_section(text, headings):
@@ -452,19 +502,7 @@ def extract_section(text, headings):
 
 
 def explicit_manual_outcome(prose):
-    if not prose.strip():
-        return False
-    patterns = [
-        r"\baccept(?:ed|s)?\b",
-        r"\breject(?:ed|s)?\b",
-        r"\bpass(?:ed|es)?\b",
-        r"\bfail(?:ed|s)?\b",
-        r"\bneeds?\s+follow[- ]?up\b",
-        r"\bfollow[- ]?up\s+required\b",
-        r"\bblocked\b",
-        r"\bapproved\b",
-    ]
-    return any(re.search(pattern, prose, re.I) for pattern in patterns)
+    return _manual_outcome_from_prose(prose) is not None
 
 
 def useful_partial(text, contract):
@@ -561,7 +599,10 @@ def parse_scalar_or_array(value):
             return []
         items = []
         for part in inner.split(","):
-            parsed = parse_string(part.strip())
+            item = part.strip()
+            if not is_quoted(item) and re.search(r"[()\{\}\[\]=]", item):
+                return _INVALID
+            parsed = parse_string(item)
             if parsed is _INVALID:
                 return _INVALID
             items.append(parsed)
@@ -572,8 +613,11 @@ def parse_scalar_or_array(value):
 def parse_list_item(value):
     if value == "" or value.startswith("-"):
         return _INVALID
-    if not is_quoted(value) and ":" in value:
-        return _INVALID
+    if not is_quoted(value):
+        if ":" in value:
+            return _INVALID
+        if value.startswith("[") or value.startswith("{"):
+            return _INVALID
     return parse_string(value)
 
 
@@ -588,7 +632,7 @@ def parse_string(value):
     match = _DOUBLE_QUOTED_RE.match(value) or _SINGLE_QUOTED_RE.match(value)
     if match:
         return _ESCAPE_RE.sub(r"\1", match.group(1))
-    if re.match(r"^[A-Za-z0-9_ ./#:-]+$", value):
+    if re.match(r"^[A-Za-z0-9_ ./#:()\{\}\[\],=-]+$", value):
         return value
     return _INVALID
 

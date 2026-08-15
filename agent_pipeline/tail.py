@@ -207,11 +207,23 @@ def _advance_or_stop(task_dir, current_path, print_fn, poll_interval, max_wait_s
     return "stop", "complete", 0.0
 
 
-def follow(task_dir, stage=None, run_id=None, poll_interval=0.4, print_fn=print, max_wait_seconds=None, verbose=False):
+def follow(task_dir, stage=None, run_id=None, poll_interval=0.4, print_fn=print, max_wait_seconds=None, verbose=False, initial_wait_seconds=5.0):
     """Tail a run's stdout file, printing one summarized line per event as
     it arrives. Stops when the .json sidecar appears (run finished) or on
-    KeyboardInterrupt. Returns a short status string."""
+    KeyboardInterrupt. Returns a short status string.
+
+    A `catenna run --background` launch returns as soon as the child
+    process is spawned, before it has written its first .stdout file --
+    a `catenna tail` issued immediately after can otherwise race that
+    window. Retry briefly for the stdout file to appear rather than
+    failing on the first missed check.
+    """
     stdout_path = locate(task_dir, stage, run_id)
+    waited_for_start = 0.0
+    while stdout_path is None and waited_for_start < initial_wait_seconds:
+        time.sleep(poll_interval)
+        waited_for_start += poll_interval
+        stdout_path = locate(task_dir, stage, run_id)
     if stdout_path is None:
         print_fn("no runs found for this task yet")
         return "no_runs"

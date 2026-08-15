@@ -10,6 +10,7 @@ from agent_pipeline.state import (
     CorruptState,
     CONTRACTS,
     STAGE_ORDER,
+    acknowledge_consumed_inputs,
     invalidated_from,
     load_state,
     new_state,
@@ -106,6 +107,71 @@ class StateTests(unittest.TestCase):
         self.assertNotIn("03", state["completed_stages"])
         self.assertTrue(state["artifact_status"][CONTRACTS["03"].filename]["stale"])
         self.assertEqual(state["current_stage"], "03")
+
+    def test_repeated_read_only_reconciliation_preserves_stale_baseline(self):
+        for key in STAGE_ORDER:
+            self.write_artifact(key)
+        state = new_state(self.task)
+        reconcile_artifacts(self.task_dir, state)
+        original_hashes = dict(state["input_hashes"])
+
+        self.write_artifact("02", valid_artifact("02") + "\nChanged input.\n")
+        first = reconcile_artifacts(self.task_dir, state, read_only=True)
+        write_state_atomic(self.task_dir, state)
+        loaded = load_state(self.task_dir, self.task)
+        second = reconcile_artifacts(self.task_dir, loaded, read_only=True)
+
+        self.assertEqual(first, ["03", "04", "04_gate", "05", "06", "07", "08"])
+        self.assertEqual(second, first)
+        self.assertEqual(state["input_hashes"], original_hashes)
+        self.assertEqual(loaded["input_hashes"], original_hashes)
+
+    def test_stage2_acknowledges_seed_inputs_without_consuming_stage2_output(self):
+        for key in STAGE_ORDER:
+            self.write_artifact(key)
+        state = new_state(self.task)
+        reconcile_artifacts(self.task_dir, state)
+        original_stage0_hash = state["input_hashes"][CONTRACTS["00"].filename]
+        original_stage2_hash = state["input_hashes"][CONTRACTS["02"].filename]
+
+        self.write_artifact("00", valid_artifact("00") + "\nChanged original request.\n")
+        invalidated = reconcile_artifacts(self.task_dir, state)
+        self.assertEqual(invalidated[0], "02")
+        self.assertEqual(state["current_stage"], "02")
+
+        self.write_artifact("02", valid_artifact("02") + "\nRefreshed technical spec.\n")
+        acknowledge_consumed_inputs(self.task_dir, state, "02")
+        invalidated = reconcile_artifacts(self.task_dir, state)
+
+        self.assertEqual(invalidated[0], "03")
+        self.assertEqual(state["current_stage"], "03")
+        self.assertIn("02", state["completed_stages"])
+        self.assertNotEqual(state["input_hashes"][CONTRACTS["00"].filename], original_stage0_hash)
+        self.assertEqual(state["input_hashes"][CONTRACTS["02"].filename], original_stage2_hash)
+
+    def test_stage6_edit_refreshes_stage7_then_stage8(self):
+        for key in STAGE_ORDER:
+            self.write_artifact(key)
+        state = new_state(self.task)
+        reconcile_artifacts(self.task_dir, state)
+
+        self.write_artifact("06", valid_artifact("06") + "\nManual notes changed.\n")
+        invalidated = reconcile_artifacts(self.task_dir, state)
+        self.assertEqual(invalidated, ["07", "08"])
+        self.assertEqual(state["current_stage"], "07")
+
+        self.write_artifact("07", valid_artifact("07").replace("Mock content for Summary.", "Mock content for Summary. Review refreshed."))
+        acknowledge_consumed_inputs(self.task_dir, state, "07")
+        invalidated = reconcile_artifacts(self.task_dir, state)
+        self.assertEqual(invalidated, ["08"])
+        self.assertEqual(state["current_stage"], "08")
+
+        self.write_artifact("08", valid_artifact("08") + "\nDecision refreshed.\n")
+        acknowledge_consumed_inputs(self.task_dir, state, "08")
+        invalidated = reconcile_artifacts(self.task_dir, state)
+        self.assertEqual(invalidated, [])
+        self.assertIsNone(state["current_stage"])
+        self.assertEqual(state["state"], "complete")
 
     def test_resume_point_calculation(self):
         for key in ("00", "01", "02"):

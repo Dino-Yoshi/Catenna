@@ -2,7 +2,7 @@ from __future__ import print_function
 
 import unittest
 
-from agent_pipeline.artifacts import CONTRACTS, manual_test_decision, parse_gate, validate_text
+from agent_pipeline.artifacts import CONTRACTS, explicit_manual_outcome, manual_test_decision, parse_gate, validate_text
 from agent_pipeline.mock_agent import gate_artifact, valid_artifact
 
 
@@ -193,6 +193,44 @@ class ArtifactValidationTests(unittest.TestCase):
         gate = parse_gate(text)["gate"]
         self.assertEqual(gate["nonblocking_issues"], ['the value is "05" here, at file.py:12-19; note it.'])
 
+    def test_yaml_gate_accepts_code_punctuation_in_multiline_list_items(self):
+        text = gate_artifact(
+            "03",
+            "\n".join(
+                [
+                    "ready_for_implementation: true",
+                    "blocking_issues: []",
+                    "nonblocking_issues:",
+                    "  - foo(bar, baz=1)",
+                    "  - compare values[0] with map{key}=value",
+                    "required_revision_targets: []",
+                ]
+            ),
+        )
+
+        result = validate_text(text, CONTRACTS["03"])
+        self.assertTrue(result["valid"], result)
+        gate = parse_gate(text)["gate"]
+        self.assertEqual(gate["nonblocking_issues"][0], "foo(bar, baz=1)")
+        self.assertEqual(gate["nonblocking_issues"][1], "compare values[0] with map{key}=value")
+
+    def test_yaml_gate_rejects_inline_array_code_punctuation(self):
+        text = gate_artifact(
+            "03",
+            "\n".join(
+                [
+                    "ready_for_implementation: true",
+                    "blocking_issues: []",
+                    "nonblocking_issues: [foo(bar, baz=1)]",
+                    "required_revision_targets: []",
+                ]
+            ),
+        )
+
+        result = validate_text(text, CONTRACTS["03"])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "unsupported gate syntax")
+
     def test_yaml_gate_rejects_orphan_and_nested_list_syntax(self):
         orphan = gate_artifact(
             "03",
@@ -206,10 +244,15 @@ class ArtifactValidationTests(unittest.TestCase):
             "03",
             "ready_for_implementation: true\nblocking_issues:\n  - B1\n    detail\nnonblocking_issues: []\nrequired_revision_targets: []",
         )
+        nested_array = gate_artifact(
+            "03",
+            "ready_for_implementation: true\nblocking_issues:\n  - [B1, B2]\nnonblocking_issues: []\nrequired_revision_targets: []",
+        )
 
         self.assertFalse(validate_text(orphan, CONTRACTS["03"])["valid"])
         self.assertFalse(validate_text(object_like, CONTRACTS["03"])["valid"])
         self.assertFalse(validate_text(nested, CONTRACTS["03"])["valid"])
+        self.assertFalse(validate_text(nested_array, CONTRACTS["03"])["valid"])
 
 
 class ManualTestDecisionTests(unittest.TestCase):
@@ -247,6 +290,31 @@ class ManualTestDecisionTests(unittest.TestCase):
     def test_prose_reject_wins_over_needs_followup_mentioned_together(self):
         text = self.section("Needs follow-up on docs, but the core change is broken and blocked from merging.")
         self.assertEqual(manual_test_decision(text), "reject")
+
+    def test_accepting_prose_allows_incidental_negative_words(self):
+        cases = [
+            "Accepted. The error path fails cleanly with a clear message.",
+            "Approved. No follow-up needed.",
+            "Manual testing passed. The previously blocked case is now handled.",
+        ]
+        for body in cases:
+            text = self.section(body)
+            self.assertTrue(validate_text(text, CONTRACTS["06"])["valid"], body)
+            self.assertEqual(manual_test_decision(text), "accept", body)
+
+    def test_incidental_only_negative_words_are_not_explicit_outcomes(self):
+        cases = [
+            "The error path fails cleanly with a clear message.",
+            "No follow-up needed.",
+            "The previously blocked case is now handled.",
+        ]
+        for body in cases:
+            text = self.section(body)
+            result = validate_text(text, CONTRACTS["06"])
+            self.assertFalse(result["valid"], body)
+            self.assertEqual(result["reason"], "manual test notes must state an explicit outcome")
+            self.assertIsNone(manual_test_decision(text), body)
+            self.assertFalse(explicit_manual_outcome(body), body)
 
     def test_overall_manual_result_heading_variant(self):
         text = "# Stage 6 - Manual test notes\n\n## Overall manual result\n\n- [x] Accept\n"

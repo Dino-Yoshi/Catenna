@@ -46,7 +46,11 @@ def changed_files_since(repo_root, baseline):
         before_present = path in before_paths
         after_hash = sha256_file(full) if full.exists() and full.is_file() else None
         if not before_present:
-            changed.append({"path": path, "reason": "absent_before_present_after"})
+            # Means "not present in the Stage 5 dirty baseline" (e.g. a
+            # newly created file, or a tracked-but-clean file that only
+            # shows up in `git status` once Stage 5 touches it) -- not
+            # "this path never existed before this task".
+            changed.append({"path": path, "reason": "new_since_dirty_baseline"})
         elif path not in before_hashes:
             changed.append({"path": path, "reason": "status_changed_after_stage5"})
         elif before_hashes.get(path) != after_hash:

@@ -446,8 +446,31 @@ class TailTests(unittest.TestCase):
 
     def test_follow_handles_no_runs(self):
         lines = []
-        result = tail.follow(self.task_dir, print_fn=lines.append)
+        result = tail.follow(self.task_dir, print_fn=lines.append, poll_interval=0.01, initial_wait_seconds=0)
         self.assertEqual(result, "no_runs")
+
+    def test_follow_retries_briefly_for_stdout_file_to_appear(self):
+        # Simulates the run --background / tail race: no run file exists
+        # yet when follow() is first called, but one appears shortly after
+        # (as it would once the background child actually starts writing).
+        lines = []
+        original_locate = tail.locate
+        calls = []
+
+        def delayed_locate(task_dir, stage=None, run_id=None):
+            calls.append(1)
+            if len(calls) < 3:
+                return None
+            return original_locate(task_dir, stage, run_id)
+
+        tail.locate = delayed_locate
+        self.addCleanup(lambda: setattr(tail, "locate", original_locate))
+        self.write_run("05-pass-1-attempt-1-claude", CLAUDE_LINES)
+
+        result = tail.follow(self.task_dir, stage="05", poll_interval=0.01, initial_wait_seconds=1, print_fn=lines.append)
+
+        self.assertEqual(result, "complete")
+        self.assertGreaterEqual(len(calls), 3)
 
 
 if __name__ == "__main__":

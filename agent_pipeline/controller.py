@@ -2,6 +2,8 @@
 
 from __future__ import print_function
 
+import calendar
+import copy
 import json
 import os
 import re
@@ -49,7 +51,7 @@ from .policies import choose_agent
 from .prompts import render_prompt
 from .real_runner import invoke_agent
 from .runner import atomic_finalize, preserve_failed
-from .state import CorruptState, STAGE_ORDER, append_log, load_state, new_state, orchestrator_dir, reconcile_artifacts, write_state_atomic
+from .state import CorruptState, STAGE_ORDER, acknowledge_consumed_inputs, append_log, load_state, new_state, orchestrator_dir, reconcile_artifacts, write_state_atomic
 from . import decision as decision_module
 from . import gates as gates_module
 from . import report as report_module
@@ -205,7 +207,7 @@ def list_tasks(plain=False):
     return EXIT_SUCCESS
 
 
-def pipeline_init(force=False):
+def pipeline_init(force=False, codex_model=None):
     tasks_existed = TASKS_ROOT.exists()
     usage_existed = USAGE_ROOT.exists()
     config_existed = config.CONFIG_PATH.exists()
@@ -214,7 +216,11 @@ def pipeline_init(force=False):
     USAGE_ROOT.mkdir(parents=True, exist_ok=True)
     config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    default_text = json.dumps(config.DEFAULT_CONFIG, indent=2, sort_keys=True) + "\n"
+    default_config = copy.deepcopy(config.DEFAULT_CONFIG)
+    if codex_model:
+        default_config["agents"]["codex"]["model"] = codex_model
+    default_text = json.dumps(default_config, indent=2, sort_keys=True) + "\n"
+    writing_defaults = not config_existed or force
     if not config_existed:
         config.CONFIG_PATH.write_text(default_text, encoding="utf-8")
         config_status = "created"
@@ -227,6 +233,21 @@ def pipeline_init(force=False):
     print("%s: %s" % (config.CONFIG_PATH, config_status))
     print("%s: %s" % (TASKS_ROOT, "exists" if tasks_existed else "created"))
     print("%s: %s" % (USAGE_ROOT, "exists" if usage_existed else "created"))
+
+    if writing_defaults:
+        if codex_model:
+            print(
+                "codex model set to %r, but pricing.%s is not configured -- "
+                "codex estimated-cost accounting will still show cost_estimated=unknown "
+                "until you add pricing.codex.%s rates to %s"
+                % (codex_model, codex_model, codex_model, config.CONFIG_PATH)
+            )
+        else:
+            print(
+                "warning: agents.codex.model and pricing.codex are unset -- "
+                "codex stages will show cost_estimated=unknown until you pass "
+                "--codex-model or edit %s directly" % config.CONFIG_PATH
+            )
 
     config.load_config()
     return EXIT_SUCCESS
@@ -252,6 +273,20 @@ def validate_mock_fixture(name, scenario):
                 raise ControllerError("mock fixture %s configures forbidden command: %s" % (name, command))
 
 
+def _cooldown_expired(reset_at):
+    """True only if reset_at parses and is in the past. Missing/unparseable
+    reset_at is treated conservatively as still-blocking (False), matching
+    usage._compute_expires_at's own fallback of assuming a cooldown is
+    still live rather than assuming it already lapsed."""
+    if not reset_at:
+        return False
+    try:
+        expires_at = calendar.timegm(time.strptime(str(reset_at), "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return False
+    return expires_at <= time.time()
+
+
 def status(task):
     task_dir = task_dir_for(task)
     try:
@@ -266,6 +301,10 @@ def status(task):
     print("completed_stages: %s" % ", ".join(state["completed_stages"]))
     if state.get("run_unavailable_agents"):
         print("run_unavailable_agents: " + json.dumps(state["run_unavailable_agents"], sort_keys=True))
+        if state["state"] == "blocked" and all(
+            _cooldown_expired(detail.get("reset_at")) for detail in state["run_unavailable_agents"].values()
+        ):
+            print("status_note: displayed state is stale -- all recorded agent cooldowns have expired; rerun to refresh")
     try:
         cooldowns = usage.load_cooldowns(cooldown_store_path())
         if cooldowns:
@@ -461,7 +500,7 @@ def pipeline_usage(task=None, agent=None, since_hours=None):
             config = None
         if config is not None and not config.get("agents", {}).get("codex", {}).get("model"):
             print(
-                "warning: agents.codex.model is unset - codex cost tracking and model "
+                "warning: agents.codex.model is unset - codex estimated-cost tracking and model "
                 "attribution are disabled (codex falls back to its own CLI default, which "
                 "this pipeline cannot see or record). Set agents.codex.model and a matching "
                 "pricing.codex rate table in orchestrator.json to fix this."
@@ -711,6 +750,7 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
             result = atomic_finalize(task_dir, "06", render_auto_stage06_notes(verification_report))
             if result["finalized"]:
                 auto_verified = True
+                acknowledge_consumed_inputs(task_dir, state, "06")
                 append_log(task_dir, {"event": "stage6_auto_verified", "stage": "06", "run_id": state.get("run_id")})
                 reconcile_artifacts(task_dir, state, read_only=False)
 
@@ -728,6 +768,10 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
             append_log(task_dir, {"event": "human_checkpoint_transition", "stage": "06", "run_id": state.get("run_id")})
             return EXIT_BLOCKED
 
+    # Idempotent: covers the human-checkpoint accept route, where
+    # 06_manual_test_notes.md is written directly with no atomic_finalize
+    # call, so the auto_verified branch's acknowledgement above never runs.
+    acknowledge_consumed_inputs(task_dir, state, "06")
     code = ensure_real_stage(task_dir, state, config, "07", "read-only", assignments, pass_number=1)
     if code != EXIT_SUCCESS:
         return code
@@ -736,6 +780,7 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
     code, final_decision = ensure_stage08_decision(task_dir, state)
     if code != EXIT_SUCCESS:
         return code
+    acknowledge_consumed_inputs(task_dir, state, "08")
     reconcile_artifacts(task_dir, state, read_only=False)
     state["last_failure"] = None
     return EXIT_SUCCESS if final_decision == "accept" else EXIT_VALIDATION
@@ -857,6 +902,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             result["final_artifact_hash"] = sha256_file(Path(final["path"]))
             if stage_key == "05":
                 result["dirty_baseline"] = state.get("dirty_baseline")
+            acknowledge_consumed_inputs(task_dir, state, stage_key)
             assignments[stage_key] = agent
             state.setdefault("stage_agents", {})[stage_key] = agent
             clear_same_stage_pending_approval(state, stage_key)
@@ -893,6 +939,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
                 completion["final_artifact_hash"] = sha256_file(Path(completion_final["path"]))
                 if stage_key == "05":
                     completion["dirty_baseline"] = state.get("dirty_baseline")
+                acknowledge_consumed_inputs(task_dir, state, stage_key)
                 assignments[stage_key] = agent
                 state.setdefault("stage_agents", {})[stage_key] = agent
                 clear_same_stage_pending_approval(state, stage_key)
@@ -940,7 +987,7 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
 
 
 def invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=None, attempt_number=1, attempt_kind="normal", retry_reason="initial/no-retry", extra_context=None):
-    prompt_path = render_prompt(task_dir, state["task"], stage_key, pass_number)
+    prompt_path = render_prompt(task_dir, state["task"], stage_key, pass_number, config=config)
     if extra_context is not None:
         with open(str(prompt_path), "a", encoding="utf-8") as handle:
             handle.write("\n")
@@ -1264,6 +1311,7 @@ def run_stage(task_dir, state, scenario, mock, stage_key, assignments):
     if stage_key in ("00", "01", "06", "08"):
         result = atomic_finalize(task_dir, stage_key, valid_artifact(stage_key))
         if result["finalized"]:
+            acknowledge_consumed_inputs(task_dir, state, stage_key)
             assignments[stage_key] = agent
             return EXIT_SUCCESS
         block(state, stage_key, result["validation"]["reason"], result["validation"].get("failure_class"))
@@ -1282,6 +1330,7 @@ def run_stage(task_dir, state, scenario, mock, stage_key, assignments):
     if not failure:
         result = atomic_finalize(task_dir, stage_key, response["output"])
         if result["finalized"]:
+            acknowledge_consumed_inputs(task_dir, state, stage_key)
             assignments[stage_key] = agent
             if state.get("pending_approval") and state["pending_approval"].get("stage") == stage_key:
                 state["pending_approval"] = None
@@ -1298,6 +1347,7 @@ def run_stage(task_dir, state, scenario, mock, stage_key, assignments):
     if failure == FAILURE_CLASS_MAX_TURNS:
         result = atomic_finalize(task_dir, stage_key, response["output"])
         if result["finalized"]:
+            acknowledge_consumed_inputs(task_dir, state, stage_key)
             assignments[stage_key] = agent
             if state.get("pending_approval") and state["pending_approval"].get("stage") == stage_key:
                 state["pending_approval"] = None
@@ -1309,6 +1359,7 @@ def run_stage(task_dir, state, scenario, mock, stage_key, assignments):
             completion = mock.invoke(agent, stage_key, attempt + 1, completion_only=True)
             final = atomic_finalize(task_dir, stage_key, completion["output"])
             if final["finalized"]:
+                acknowledge_consumed_inputs(task_dir, state, stage_key)
                 assignments[stage_key] = agent
                 return EXIT_SUCCESS
             block(state, stage_key, final["validation"]["reason"], FAILURE_CLASS_MALFORMED_ARTIFACT)
