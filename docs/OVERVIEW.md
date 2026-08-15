@@ -377,6 +377,10 @@ that would violate an `independent_from` constraint.
   against a real Antigravity CLI fixture — it will silently return `None`
   for agy unless agy's real `result` event happens to match the speculative
   `usage`/`total_cost_usd`/`cost_usd` field names guessed at in Phase 4.
+- Codex cost accounting is estimate-only: `stream_events.py` extracts Codex
+  token usage, and `real_runner.py` prices it locally from configured
+  `pricing.codex` rates. No provider-real Codex `total_cost_usd` field is
+  recorded until a real `codex exec --json` fixture confirms one.
 - `reasoning_summary` (Phase 5) has no known agy event to extract from at
   all (not merely unconfirmed like agy's usage extraction) — agy reasoning
   traces are never captured, repo-wide, until agy's stream-json schema for
