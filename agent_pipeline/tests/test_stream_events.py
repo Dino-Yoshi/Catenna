@@ -91,6 +91,14 @@ CODEX_STREAM_WITH_CACHE_USAGE = "\n".join(
     ]
 )
 
+CODEX_STREAM_WITH_SPECULATIVE_COST = "\n".join(
+    [
+        '{"type":"thread.started","thread_id":"t1"}',
+        '{"type":"turn.started"}',
+        '{"type":"turn.completed","usage":{"input_tokens":25,"output_tokens":5,"total_cost_usd":0.99}}',
+    ]
+)
+
 CLAUDE_STREAM_WITH_THINKING = "\n".join(
     [
         '{"type":"system","subtype":"init","cwd":"/repo"}',
@@ -228,6 +236,11 @@ class UsageSummaryTests(unittest.TestCase):
         self.assertEqual(usage["cache_read_tokens"], 75)
         self.assertEqual(usage["cache_creation_tokens"], 10)
         self.assertNotIn("reasoning_output_tokens", usage)
+
+    def test_codex_usage_does_not_trust_speculative_cost_field(self):
+        usage = stream_events.usage_summary("codex", CODEX_STREAM_WITH_SPECULATIVE_COST)
+        self.assertEqual(usage["input_tokens"], 25)
+        self.assertIsNone(usage["total_cost_usd"])
 
     def test_claude_usage_and_cost_extracted(self):
         usage = stream_events.usage_summary("claude", CLAUDE_STREAM_WITH_USAGE)
