@@ -1341,6 +1341,15 @@ class ControllerReliabilityTests(unittest.TestCase):
                 self.assertIn("Repository-analysis budget:", prompts.prompt_text(task_dir, "task", stage_key))
             self.assertNotIn("Repository-analysis budget:", prompts.prompt_text(task_dir, "task", "05"))
 
+    def test_gate_prompts_quote_yaml_list_items_immediately_before_gate_shape(self):
+        expected = "Wrap every blocking_issues, nonblocking_issues, and required_revision_targets list item in double quotes, including items that look safe unquoted."
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "task"
+            for stage_key in ("03", "04_gate"):
+                lines = prompts.prompt_text(task_dir, "task", stage_key).splitlines()
+                gate_index = lines.index("End with this exact YAML gate shape:")
+                self.assertEqual(lines[gate_index - 1], expected)
+
     def test_stage5_prompt_renders_configured_verification_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = Path(tmp) / "task"
