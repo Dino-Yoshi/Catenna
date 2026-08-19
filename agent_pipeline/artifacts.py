@@ -255,7 +255,12 @@ def validate_text(text, contract, read_only=False):
             "reason": "missing sections: " + ", ".join(missing_sections),
             "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
-    empty_section = first_empty_required_section(contract, sections)
+    gate_peek = None
+    if contract.gate:
+        peek_result = parse_gate(text)
+        if peek_result["valid"]:
+            gate_peek = peek_result["gate"]
+    empty_section = first_empty_required_section(contract, sections, gate_peek)
     if empty_section is not None:
         return {
             "valid": False,
@@ -326,7 +331,24 @@ def collect_sections(lines):
     return sections
 
 
-def first_empty_required_section(contract, sections):
+# Sections whose body is a prose rendering of a YAML gate list and may
+# legitimately be empty when that list is empty (e.g. "no blocking issues
+# found") rather than a sign of malformed output.
+_GATE_LIST_SECTION_KEYS = {
+    "03_audit.md": {
+        "Blocking issues": "blocking_issues",
+        "Nonblocking issues": "nonblocking_issues",
+        "Required revision targets": "required_revision_targets",
+    },
+    "04_final_brief_audit.md": {
+        "Blocking issues": "blocking_issues",
+        "Nonblocking issues": "nonblocking_issues",
+        "Required brief revisions": "required_revision_targets",
+    },
+}
+
+
+def first_empty_required_section(contract, sections, gate=None):
     if contract.filename == "06_manual_test_notes.md":
         result_sections = []
         result_sections.extend(sections.get("Decision", []))
@@ -334,10 +356,15 @@ def first_empty_required_section(contract, sections):
         if result_sections and not any(section_body_has_content(section) for section in result_sections):
             return "Decision or Overall manual result"
         return None
+    gate_list_keys = _GATE_LIST_SECTION_KEYS.get(contract.filename, {})
     for section in contract.sections:
         bodies = sections.get(section, [])
-        if bodies and not any(section_body_has_content(body) for body in bodies):
-            return section
+        if not bodies or any(section_body_has_content(body) for body in bodies):
+            continue
+        gate_key = gate_list_keys.get(section)
+        if gate is not None and gate_key is not None and gate.get(gate_key) == []:
+            continue
+        return section
     return None
 
 
