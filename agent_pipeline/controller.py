@@ -715,12 +715,24 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
         if post_check["valid"] and not stage5_current_run:
             block_transition(task_dir, state, "05", "Stage 5 post-processing already exists but was not produced by this controller run; no adoption path is configured", FAILURE_CLASS_STAGE5_AMBIGUITY, completed_through="04_gate")
             return EXIT_BLOCKED
-        if not stage5_current_run:
-            reason = post_check["reason"]
-            if not any_stage5_postprocessing_present(task_dir, state):
-                reason = "Pre-existing Stage 5 report/provenance has no complete post-processing and no adoption path is configured"
-            block_transition(task_dir, state, "05", reason, post_check.get("failure_class", FAILURE_CLASS_STAGE5_AMBIGUITY), completed_through="04_gate")
-            return EXIT_BLOCKED
+        if not stage5_current_run and not post_check["valid"]:
+            if any_stage5_postprocessing_present(task_dir, state):
+                block_transition(task_dir, state, "05", post_check["reason"], post_check.get("failure_class", FAILURE_CLASS_STAGE5_AMBIGUITY), completed_through="04_gate")
+                return EXIT_BLOCKED
+            # Adopt: report_check above already independently verified this
+            # report corresponds to a real, successful, workspace-write Stage 5
+            # run (stage5_report_provenance). No postprocessing artifact exists
+            # at all yet -- this is a Stage 5 success whose controller process
+            # ended for an unrelated reason (e.g. a bug elsewhere in this same
+            # run, or an interrupted process) before postprocessing ran, not a
+            # conflicting or partially-written state. Postprocessing below is
+            # idempotent given a verified run record, so run it now against
+            # the already-validated report rather than leaving the task
+            # permanently deadlocked (reconcile_artifacts will keep marking
+            # "05" structurally complete from the report file alone on every
+            # future run, so this path would never otherwise become reachable
+            # again).
+            append_log(task_dir, {"event": "stage5_postprocessing_adopted", "stage": "05", "provenance_run_id": report_check["run"].get("run_id"), "run_id": state.get("run_id")})
 
         try:
             manifest = write_manifest(task_dir, REPO_ROOT, state, report_check["run"], baseline)
