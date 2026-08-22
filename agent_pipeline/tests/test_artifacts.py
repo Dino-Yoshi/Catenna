@@ -214,6 +214,28 @@ class ArtifactValidationTests(unittest.TestCase):
         self.assertEqual(gate["nonblocking_issues"][0], "foo(bar, baz=1)")
         self.assertEqual(gate["nonblocking_issues"][1], "compare values[0] with map{key}=value")
 
+    def test_yaml_gate_accepts_commas_inside_quoted_inline_array_items(self):
+        text = gate_artifact(
+            "03",
+            "\n".join(
+                [
+                    "ready_for_implementation: false",
+                    'blocking_issues: ["initialize(..., enabled=False, ...) has no defined config source, and conflicts with the existing precedent"]',
+                    'nonblocking_issues: ["first item, with a comma", "second item, with another"]',
+                    "required_revision_targets: []",
+                ]
+            ),
+        )
+
+        result = validate_text(text, CONTRACTS["03"])
+        self.assertTrue(result["valid"], result)
+        gate = parse_gate(text)["gate"]
+        self.assertEqual(
+            gate["blocking_issues"],
+            ["initialize(..., enabled=False, ...) has no defined config source, and conflicts with the existing precedent"],
+        )
+        self.assertEqual(gate["nonblocking_issues"], ["first item, with a comma", "second item, with another"])
+
     def test_yaml_gate_rejects_inline_array_code_punctuation(self):
         text = gate_artifact(
             "03",
