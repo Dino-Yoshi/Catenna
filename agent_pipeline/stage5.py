@@ -46,14 +46,25 @@ def stage5_run_matches_report(run, report_path, report_hash, state):
     candidate = Path(run.get("candidate_artifact_path"))
     if not candidate.exists() or not candidate.is_file():
         return False
-    try:
-        candidate_hash = sha256_file(candidate)
-    except Exception:
-        return False
-    if candidate_hash != report_hash:
-        return False
-    if run.get("final_artifact_hash") and run.get("final_artifact_hash") != report_hash:
-        return False
+    final_hash = run.get("final_artifact_hash")
+    if final_hash:
+        # Trust the hash recorded at finalization time (controller.py's
+        # atomic_finalize path): it was computed from the *normalized*
+        # candidate output (normalize_stage_output strips provider commentary
+        # before the required heading), not the raw candidate file. Re-hashing
+        # the raw candidate here and requiring it to equal the finalized
+        # report would spuriously fail any run whose raw output had a
+        # preamble stripped -- the exact, common case this normalization
+        # exists to handle.
+        if final_hash != report_hash:
+            return False
+    else:
+        try:
+            candidate_hash = sha256_file(candidate)
+        except Exception:
+            return False
+        if candidate_hash != report_hash:
+            return False
     run["final_artifact_hash"] = report_hash
     run["final_artifact_path"] = str(report_path)
     if not run.get("metadata_path") or not Path(run.get("metadata_path")).exists():
