@@ -615,6 +615,40 @@ class _Invalid(object):
 _INVALID = _Invalid()
 
 
+def _split_top_level_commas(inner):
+    parts = []
+    current = []
+    quote = None
+    i = 0
+    length = len(inner)
+    while i < length:
+        char = inner[i]
+        if quote is not None:
+            current.append(char)
+            if char == "\\" and i + 1 < length:
+                current.append(inner[i + 1])
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+            i += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            current.append(char)
+            i += 1
+            continue
+        if char == ",":
+            parts.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(char)
+        i += 1
+    parts.append("".join(current))
+    return parts
+
+
 def parse_scalar_or_array(value):
     if value == "true":
         return True
@@ -625,7 +659,7 @@ def parse_scalar_or_array(value):
         if not inner:
             return []
         items = []
-        for part in inner.split(","):
+        for part in _split_top_level_commas(inner):
             item = part.strip()
             if not is_quoted(item) and re.search(r"[()\{\}\[\]=]", item):
                 return _INVALID
