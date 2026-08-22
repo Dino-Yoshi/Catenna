@@ -11,6 +11,7 @@ from pathlib import Path
 
 from agent_pipeline import config
 from agent_pipeline import controller
+from agent_pipeline.artifacts import sha256_file
 from agent_pipeline import gates
 from agent_pipeline import prompts
 from agent_pipeline import usage
@@ -781,6 +782,93 @@ class ControllerReliabilityTests(unittest.TestCase):
             persisted = load_state(task_dir, task)
             self.assertIn("05", persisted["completed_stages"])
             self.assertEqual(persisted["current_stage"], "06")
+
+    def test_adopts_valid_preexisting_stage5_report_with_no_postprocessing(self):
+        # Regression for a real deadlock: a Stage 5 run can finalize its
+        # report successfully and then have the controller process end for an
+        # unrelated reason before postprocessing (manifest/handoff/
+        # verification) runs. reconcile_artifacts marks "05" complete from the
+        # report file's structural validity alone on every subsequent run, so
+        # the stage-05-specific block is never re-entered on its own -- before
+        # this fix, that combination blocked forever with "no adoption path is
+        # configured" since post-processing was checked but never (re)run for
+        # a report that wasn't produced by *this* controller invocation.
+        with tempfile.TemporaryDirectory() as tmp:
+            task = "stage5-adopt"
+            task_dir = Path(tmp) / task
+            task_dir.mkdir(parents=True)
+            for stage_key in ("00", "01", "02", "03", "04", "04_gate"):
+                (task_dir / CONTRACTS[stage_key].filename).write_text(valid_artifact(stage_key), encoding="utf-8")
+            report_body = valid_artifact("05")
+            report_path = task_dir / CONTRACTS["05"].filename
+            report_path.write_text(report_body, encoding="utf-8")
+            report_hash = sha256_file(report_path)
+
+            candidate_path = task_dir / "candidate.md"
+            candidate_path.write_text("Here you go.\n\n" + report_body, encoding="utf-8")
+            metadata_path = task_dir / "run.json"
+            metadata_path.write_text("{}", encoding="utf-8")
+            stdout_path = task_dir / "run.stdout"
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path = task_dir / "run.stderr"
+            stderr_path.write_text("", encoding="utf-8")
+
+            state = new_state(task, "run-test")
+            state["dirty_baseline"] = {"captured_at": "earlier", "entries": [], "hashes": {}}
+            state.setdefault("real_stage_runs", {})["05"] = [{
+                "candidate_artifact_path": str(candidate_path),
+                "run_id": "run-earlier-process",
+                "pass_number": 1,
+                "attempt_number": 1,
+                "attempt_kind": "provider_fallback",
+                "retry_reason": "provider fallback",
+                "agent": "claude",
+                "execution_mode": "workspace-write",
+                "exit_code": 0,
+                "failure_class": None,
+                "final_artifact_hash": report_hash,
+                "metadata_path": str(metadata_path),
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+                "dirty_baseline": {"captured_at": "earlier", "entries": [], "hashes": {}},
+            }]
+
+            # write_manifest is reached only once the "no adoption path"
+            # gate has been passed (report_check + post_check both cleared
+            # without blocking) -- forcing it to fail here, and asserting the
+            # failure marker propagates through, proves control flow actually
+            # got past that gate rather than short-circuiting some other way.
+            # (write_manifest's caller wraps it in try/except and reports the
+            # failure via state["last_failure"] rather than letting it
+            # propagate, so we assert on that instead of a raised exception.)
+            def fail_write_manifest(*args, **kwargs):
+                raise RuntimeError("adopted postprocessing reached")
+
+            original_write_manifest = controller.write_manifest
+            original_capture = controller.capture_dirty_baseline
+            controller.write_manifest = fail_write_manifest
+            controller.capture_dirty_baseline = lambda root: {"captured_at": "now", "entries": [], "hashes": {}}
+            self.addCleanup(lambda: setattr(controller, "write_manifest", original_write_manifest))
+            self.addCleanup(lambda: setattr(controller, "capture_dirty_baseline", original_capture))
+
+            def unexpected_ensure_real_stage(*args, **kwargs):
+                raise AssertionError("ensure_real_stage must not be called for an already-provenance-valid stage 05")
+
+            original_ensure = controller.ensure_real_stage
+
+            def guarded_ensure(task_dir_arg, state_arg, config_arg, stage_key, *args, **kwargs):
+                if stage_key == "05":
+                    return unexpected_ensure_real_stage()
+                return original_ensure(task_dir_arg, state_arg, config_arg, stage_key, *args, **kwargs)
+
+            controller.ensure_real_stage = guarded_ensure
+            self.addCleanup(lambda: setattr(controller, "ensure_real_stage", original_ensure))
+
+            code = controller.run_real_pipeline(task_dir, task, state, {"max_gate_passes": 1}, allow_dirty=True)
+
+            self.assertEqual(code, EXIT_BLOCKED)
+            self.assertNotEqual(state.get("last_failure", {}).get("failure_class"), "stage5_ambiguity")
+            self.assertIn("adopted postprocessing reached", state.get("last_failure", {}).get("reason", ""))
 
     def test_stage4_gate_loop_does_not_short_circuit_rejected_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
