@@ -156,7 +156,10 @@ None blocking this gate. D1–D8 are closed by R01–R08 and the regressions
 above. V3 remains out of scope for this gate.
 
 Deferred follow-up, recorded 2026-09-25 and outside this gate by operator
-decision: when a Stage 7 review-input identity exhausts its allowance, the
+decision. **Resolved by F03** ([v2-cleanup-followups.md](v2-cleanup-followups.md#slice-f03--no-approval-when-no-attempt-can-follow));
+closure is recorded in the [follow-up gate](v2-cleanup-followups-gate.md).
+An exhausted identity now blocks without creating an approval, and its reason
+no longer mentions `approve-retry`. Original observation: when a Stage 7 review-input identity exhausts its allowance, the
 blocking reason says to use `approve-retry`, but no pending approval is
 created, so `approve-retry` reports "no pending approval". The budget itself
 behaves as R02 requires (no refill; a new identity gets a new allowance);

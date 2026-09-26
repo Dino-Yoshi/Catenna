@@ -18,7 +18,7 @@ from pathlib import Path
 from .artifacts import CONTRACTS, manual_test_decision, sha256_file
 from .config import agent_config, configured_candidates
 from .source_identity import identity_problem, parse_cited_identity, same_identity, with_identity_change
-from .state import orchestrator_dir
+from .state import orchestrator_dir, upstream_staleness
 
 
 EVIDENCE_KINDS = ("verification", "stage06", "stage07", "stage08")
@@ -386,18 +386,13 @@ def evaluate(task_dir, state, config, identity, identity_error=None):
     # Stage 6-8 can be internally source-current while an upstream task
     # artifact has changed.  The acknowledged hashes intentionally remain at
     # the accepted chain until the dependent stage is rerun; do not present
-    # that historical evidence as current acceptance in the meantime.
-    acknowledged = state.get("input_hashes") or {}
-    changed_seed = []
-    for stage in ("00", "01"):
-        name = CONTRACTS[stage].filename
-        path = Path(task_dir) / name
-        recorded = acknowledged.get(name)
-        if not isinstance(recorded, str) or not path.is_file() or sha256_file(path) != recorded:
-            changed_seed.append(name)
-    if changed_seed:
-        reason = "upstream task inputs changed: " + ", ".join(changed_seed)
-        result["stage06"] = _result(False, reason)
+    # that historical evidence as current acceptance in the meantime.  F01:
+    # the whole accepted chain (00-05), judged by the reconcile rule itself.
+    upstream = upstream_staleness(Path(task_dir), state, "06")
+    if upstream["stale"]:
+        reason = upstream_reason(upstream)
+        for key in ("stage06", "stage07", "stage08"):
+            result[key] = _result(False, reason)
     for key in ("stage06", "stage07", "stage08"):
         if not result[key]["current"]:
             result["current_acceptance"] = False
@@ -410,6 +405,16 @@ def evaluate(task_dir, state, config, identity, identity_error=None):
     for key in ("verification", "stage06", "stage07", "stage08"):
         result[key] = {k: v for k, v in result[key].items() if k != "record"}
     return result
+
+
+def upstream_reason(upstream):
+    named = ", ".join("%s (%s)" % item for item in upstream["artifacts"]) or "none named"
+    redispatch = upstream["redispatch_stage"]
+    if redispatch is not None:
+        next_step = "`run` will re-dispatch Stage %s" % redispatch
+    else:
+        next_step = "`run` will re-acknowledge the accepted chain before any new acceptance"
+    return "upstream task artifacts differ from the accepted chain: %s; %s" % (named, next_step)
 
 
 def archive(task_dir, filenames, reason, run_id=None):

@@ -1,6 +1,6 @@
 # V2 cleanup remediation — Implementation brief
 
-Status: scoped, not implemented. Source: 2026-09-25 review of the C01–C09 working-tree candidate; defects D1–D8 are recorded in the [cleanup completion gate](v2-cleanup-gate.md#reopened-defects). Normative requirements: [v2-cleanup.md](v2-cleanup.md), whose amended C03/C05/C06/C07/C08 wording these slices implement.
+Status: implemented; the [cleanup completion gate](v2-cleanup-gate.md) closed 2026-09-25 after R08. Residual cross-slice gaps are addressed by [follow-up slices F01–F05](v2-cleanup-followups.md). Source: 2026-09-25 review of the C01–C09 working-tree candidate; defects D1–D8 are recorded in the [cleanup completion gate](v2-cleanup-gate.md#reopened-defects). Normative requirements: [v2-cleanup.md](v2-cleanup.md), whose amended C03/C05/C06/C07/C08 wording these slices implement.
 
 Purpose: close the cleanup gate. Each slice fixes one class of defect found where C01–C09 interact. Deliver R01–R08 in order; R02 depends on R01, and R08 runs last. Requirement IDs are stable identifiers for implementation tasks and regression tests.
 

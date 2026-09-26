@@ -148,7 +148,9 @@ class D2ReviewInvalidationAndBudgetTests(RemediationProbeFixture):
 
         reason = self.reason()
         self.assertIn("budget exhausted for review-input identity", reason)
-        self.assertIn("approve-retry", reason)
+        # F03-FR5: approve-retry cannot refill an exhausted review identity.
+        self.assertNotIn("approve-retry", reason)
+        self.assertIn("bound Stage 6 change", reason)
 
 
 class D3D7FailedWriterApprovalTests(RemediationProbeFixture):

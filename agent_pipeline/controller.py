@@ -54,7 +54,7 @@ from .real_runner import ManagedProcessInterrupted, invoke_agent
 from .durable import DurableStorageError
 from .runner import atomic_finalize, preserve_failed
 from .source_identity import SourceIdentityError, capture_source_identity, changed_identity_paths, format_identity, same_identity, with_identity_change
-from .state import CorruptState, STAGE_ORDER, acknowledge_consumed_inputs, append_log, load_state, new_state, orchestrator_dir, reconcile_artifacts, write_state_atomic
+from .state import CorruptState, STAGE_CONSUMED_INPUTS, STAGE_ORDER, acknowledge_consumed_inputs, append_log, load_state, new_state, orchestrator_dir, reconcile_artifacts, upstream_staleness, write_state_atomic
 from . import decision as decision_module
 from . import evidence as evidence_module
 from . import gates as gates_module
@@ -355,7 +355,27 @@ def current_evidence_summary(task_dir, state):
     identity, error = current_source_identity(task_dir)
     summary = evidence_module.evaluate(task_dir, state, cfg, identity, error)
     summary["review_attempts"] = current_review_attempt_summary(task_dir, state, cfg, identity)
+    summary["stage_attempts"] = current_stage_attempt_summary(task_dir, state, cfg)
     return summary
+
+
+def current_stage_attempt_summary(task_dir, state, config):
+    """F02-FR4: per-identity attempts for a task blocked on a budgeted stage, else None."""
+    if state.get("state") != "blocked":
+        return None
+    stage_key = (state.get("last_failure") or {}).get("stage")
+    identity = attempts_module.current_stage_input_identity(task_dir, stage_key)
+    if identity is None:
+        return None
+    used = attempts_module.count_stage_input_attempts(task_dir, stage_key, identity)
+    allowed = int(config.get("stage_attempt_budget", 2))
+    return {
+        "stage": stage_key,
+        "identity": identity,
+        "attempts_used": used,
+        "attempts_allowed": allowed,
+        "exhausted": used >= allowed,
+    }
 
 
 def current_review_attempt_summary(task_dir, state, config, identity=None, inputs=None):
@@ -391,6 +411,12 @@ def print_current_evidence(task_dir, state):
     review = summary["review_attempts"]
     print("review_input_identity: %s" % (review.get("identity") or "unavailable (%s)" % review.get("reason")))
     print("review_attempts: %s/%s" % (review["attempts_used"], review["attempts_allowed"]))
+    stage_attempts = summary.get("stage_attempts")
+    if stage_attempts:
+        print("stage_attempts: %s %s/%s (stage input identity %s)" % (
+            stage_attempts["stage"], stage_attempts["attempts_used"],
+            stage_attempts["attempts_allowed"], stage_attempts["identity"],
+        ))
     print("current_acceptance: %s (%s)" % (
         color.green("yes") if summary["current_acceptance"] else color.red("no"),
         summary["reason"],
@@ -659,6 +685,21 @@ def approve_retry(task, approval_id):
             if pending.get("approved") or pending.get("consumed"):
                 print("approval already used")
                 return EXIT_BAD_INPUT
+            try:
+                config = load_config()
+            except ConfigError as exc:
+                print("invalid real-run config: %s" % exc)
+                return EXIT_VALIDATION
+            allowance = approval_attempt_allowance(task_dir, config, pending)
+            if allowance is not None and allowance["exhausted"]:
+                # F03-FR4: approval never refills a budget.
+                stage_key = pending.get("stage")
+                reason = exhausted_writer_reason(stage_key, pending.get("failed_source_changes"), pending.get("failed_source_comparison_error"), allowance)
+                withdraw_pending_approval(task_dir, state, reason)
+                block_transition(task_dir, state, stage_key, reason, pending.get("failure_class") or FAILURE_CLASS_MALFORMED_ARTIFACT)
+                write_state_atomic(task_dir, state)
+                print("approval withdrawn: " + reason)
+                return EXIT_BLOCKED
             if pending.get("retry_type") == "failed_write_source_change":
                 try:
                     pending["approved_source_baseline"] = capture_writer_source_baseline(task_dir)
@@ -756,12 +797,11 @@ def run_real_pipeline(task_dir, task, state, config, allow_dirty):
     recovery_error = attempts_module.recover(
         task_dir, state, atomic_finalize, stages=STAGE_ORDER,
         failed_writer_recovery=lambda dispatch, completed: recover_failed_writer_approval(
-            task_dir, state, dispatch, completed
+            task_dir, state, config, dispatch, completed, defer_if_upstream_stale=True
         ),
     )
     if recovery_error:
-        if state.get("state") != "awaiting_retry_approval":
-            block_transition(task_dir, state, state.get("current_stage") or "02", "durable recovery blocked: " + recovery_error, FAILURE_CLASS_STAGE5_AMBIGUITY)
+        block_after_recovery(task_dir, state, state.get("current_stage") or "02", recovery_error)
         return EXIT_BLOCKED
     reconcile_artifacts(task_dir, state, read_only=False)
     cost_control = config.get("cost_control", {})
@@ -1284,19 +1324,22 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
     recovery_error = attempts_module.recover(
         task_dir, state, atomic_finalize, stages=(stage_key,),
         failed_writer_recovery=lambda dispatch, completed: recover_failed_writer_approval(
-            task_dir, state, dispatch, completed
+            task_dir, state, config, dispatch, completed
         ),
     )
     if recovery_error:
-        if state.get("state") != "awaiting_retry_approval":
-            block_transition(task_dir, state, stage_key, "durable recovery blocked: " + recovery_error, FAILURE_CLASS_STAGE5_AMBIGUITY)
+        block_after_recovery(task_dir, state, stage_key, recovery_error)
         return EXIT_BLOCKED
-    fresh_input_stages = set(state.pop("_r01_fresh_input_stages", []) or [])
-    fresh_input_allowance = stage_key in fresh_input_stages
-    if fresh_input_stages - {stage_key}:
-        state["_r01_fresh_input_stages"] = sorted(fresh_input_stages - {stage_key})
+    # F02-FR3: the R01 fresh-input marker no longer grants anything; drop any
+    # copy persisted by an older controller.
+    state.pop("_r01_fresh_input_stages", None)
     pending = state.get("pending_approval") or {}
-    awaiting_retry_approval = state.get("state") == "awaiting_retry_approval"
+    # F03-FR3: an approval that was granted but not consumed (because no
+    # attempt could be dispatched) stays usable for this stage.
+    approved_unconsumed_here = (
+        pending.get("stage") == stage_key and pending.get("approved") and not pending.get("consumed")
+    )
+    awaiting_retry_approval = state.get("state") == "awaiting_retry_approval" or approved_unconsumed_here
     approved_retry_dispatch = False
     completed = stage_key in state.get("completed_stages", [])
     if not awaiting_retry_approval:
@@ -1307,7 +1350,19 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             return EXIT_SUCCESS
         return EXIT_BLOCKED
     else:
-        if not pending.get("approved") or pending.get("consumed"):
+        if pending.get("consumed"):
+            return EXIT_BLOCKED
+        if not completed:
+            # F03-FR4: an approval whose stage has no attempt left can never
+            # be used; withdraw it instead of leaving a dead end.
+            allowance = approval_attempt_allowance(task_dir, config, pending)
+            if allowance is not None and allowance["exhausted"]:
+                reason = exhausted_writer_reason(stage_key, pending.get("failed_source_changes"), pending.get("failed_source_comparison_error"), allowance)
+                withdraw_pending_approval(task_dir, state, reason)
+                block_transition(task_dir, state, stage_key, reason, pending.get("failure_class") or FAILURE_CLASS_MALFORMED_ARTIFACT)
+                write_state_atomic(task_dir, state)
+                return EXIT_BLOCKED
+        if not pending.get("approved"):
             return EXIT_BLOCKED
         if pending.get("retry_type") == "failed_write_source_change":
             try:
@@ -1328,30 +1383,32 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
                 append_log(task_dir, {"event": "retry_approval_invalidated", "stage": stage_key, "reason": pending["reason"], "run_id": state.get("run_id")})
                 return EXIT_BLOCKED
         if completed:
-            consume_approved_retry_if_present(state, stage_key)
-            append_log(task_dir, {"event": "approval_consumed", "stage": stage_key, "run_id": state.get("run_id")})
-            state["pending_approval"] = None
+            # F03-FR3: nothing is dispatched for a completed stage, so the
+            # approval is withdrawn (kept in history), never consumed.
+            withdraw_pending_approval(task_dir, state, "stage %s already completed; no attempt was dispatched" % stage_key)
             return EXIT_SUCCESS
-        consume_approved_retry_if_present(state, stage_key)
-        append_log(task_dir, {"event": "approval_consumed", "stage": stage_key, "run_id": state.get("run_id")})
         state["state"] = "running"
         approved_retry_dispatch = True
     attempt_budget = int(config.get("stage_attempt_budget", 2))
     source_change_retry = pending.get("retry_type") == "failed_write_source_change"
+    # F02: stages 02-05 are budgeted per consumed-input identity, counted from
+    # durable dispatch records. state["attempts"] only numbers attempts.
+    stage_identity = attempts_module.current_stage_input_identity(task_dir, stage_key)
     if stage_key == "07" and review_input_identity is not None and not (approved_retry_dispatch and not source_change_retry):
         attempts_used = attempts_module.count_stage7_attempts(task_dir, review_input_identity)
-    elif force or fresh_input_allowance or (approved_retry_dispatch and not source_change_retry):
+    elif force or (approved_retry_dispatch and not source_change_retry):
         attempts_used = 0
+    elif stage_identity is not None:
+        attempts_used = attempts_module.count_stage_input_attempts(task_dir, stage_key, stage_identity)
     else:
         attempts_used = int(state.setdefault("attempts", {}).get(stage_key, 0))
     next_attempt_kind = "normal"
     next_retry_reason = "initial/no-retry"
     if stage_key == "07" and review_input_identity is not None and attempts_used >= attempt_budget:
-        block_transition(
-            task_dir, state, stage_key,
-            "Stage 7 attempt budget exhausted for review-input identity %s; use approve-retry to authorize another attempt" % review_input_identity,
-            FAILURE_CLASS_MALFORMED_ARTIFACT,
-        )
+        block_transition(task_dir, state, stage_key, stage7_budget_exhausted_reason(review_input_identity, attempts_used, attempt_budget), FAILURE_CLASS_MALFORMED_ARTIFACT)
+        return EXIT_BLOCKED
+    if stage_identity is not None and attempts_used >= attempt_budget:
+        block_transition(task_dir, state, stage_key, stage_budget_exhausted_reason(stage_key, stage_identity, attempts_used, attempt_budget), FAILURE_CLASS_MALFORMED_ARTIFACT)
         return EXIT_BLOCKED
     while attempts_used < attempt_budget:
         route = choose_real_agent(stage_key, state, config, assignments, execution_mode)
@@ -1373,6 +1430,10 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             state.setdefault("fallback_events", []).append(event)
             state.setdefault("fallback_history", []).append(event)
             append_log(task_dir, {"event": "provider_fallback_selected", "stage": stage_key, "provider": agent, "classification": event["reason"], "run_id": state["run_id"]})
+        if approved_retry_dispatch and consume_approved_retry_if_present(state, stage_key):
+            # F03-FR3: consumed only in the step that dispatches; the
+            # dispatch record below carries the consumed approval.
+            append_log(task_dir, {"event": "approval_consumed", "stage": stage_key, "run_id": state.get("run_id")})
         attempt_number = increment_attempt(state, stage_key)
         attempts_used += 1
         increment_agent_count(state, agent)
@@ -1425,7 +1486,8 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
         if failure_class is None and not process_succeeded:
             failure_class = FAILURE_CLASS_UNKNOWN_FAILURE
         preserve_failed(task_dir, stage_key, raw_output, failure_class or FAILURE_CLASS_MALFORMED_ARTIFACT, {"agent": agent, "metadata_path": result.get("metadata_path")})
-        if failed_writer_requires_approval(task_dir, state, stage_key, execution_mode, agent, result, failure_class):
+        if failed_writer_requires_approval(task_dir, state, stage_key, execution_mode, agent, result, failure_class,
+                                           allowance=live_allowance(stage_identity, attempts_used, attempt_budget)):
             return EXIT_BLOCKED
         if failure_class in (FAILURE_CLASS_USAGE_LIMIT, FAILURE_CLASS_SOURCE_FAILURE) or (failure_class == FAILURE_CLASS_RATE_LIMIT and credible_reset(result)):
             mark_unavailable(
@@ -1492,7 +1554,8 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
             if completion_failure is None and not completion_succeeded:
                 completion_failure = FAILURE_CLASS_UNKNOWN_FAILURE
             preserve_failed(task_dir, stage_key, completion_raw_output, completion_failure or FAILURE_CLASS_MALFORMED_ARTIFACT, {"agent": agent, "metadata_path": completion.get("metadata_path")})
-            if failed_writer_requires_approval(task_dir, state, stage_key, execution_mode, agent, completion, completion_failure):
+            if failed_writer_requires_approval(task_dir, state, stage_key, execution_mode, agent, completion, completion_failure,
+                                               allowance=live_allowance(stage_identity, attempts_used, attempt_budget)):
                 return EXIT_BLOCKED
             state["attempts"][human_approved_retry_key] = 1
             require_retry_approval(
@@ -1529,10 +1592,109 @@ def ensure_real_stage(task_dir, state, config, stage_key, execution_mode, assign
         if failure_class == FAILURE_CLASS_RATE_LIMIT:
             block_transition(task_dir, state, stage_key, "rate limit without credible reset time", failure_class)
             return EXIT_BLOCKED
+        if (stage_identity is not None and attempts_used >= attempt_budget and
+                failure_class in (FAILURE_CLASS_MALFORMED_ARTIFACT, FAILURE_CLASS_EMPTY_OUTPUT, FAILURE_CLASS_TIMEOUT)):
+            block_transition(task_dir, state, stage_key, stage_budget_exhausted_reason(stage_key, stage_identity, attempts_used, attempt_budget, after=failure_class), failure_class)
+            return EXIT_BLOCKED
         block_transition(task_dir, state, stage_key, "real stage failed: " + (failure_class or final["validation"]["reason"]), failure_class or final["validation"].get("failure_class"))
+        return EXIT_BLOCKED
+    if stage_identity is not None:
+        block_transition(task_dir, state, stage_key, stage_budget_exhausted_reason(stage_key, stage_identity, attempts_used, attempt_budget), FAILURE_CLASS_MALFORMED_ARTIFACT)
         return EXIT_BLOCKED
     block_transition(task_dir, state, stage_key, "attempt budget exhausted", FAILURE_CLASS_MALFORMED_ARTIFACT)
     return EXIT_BLOCKED
+
+
+def stage_budget_exhausted_reason(stage_key, identity, attempts_used, attempt_budget, after=None):
+    """F02-FR4: name the stage and the input identity whose budget is spent."""
+    inputs = ", ".join(CONTRACTS[key].filename for key in STAGE_CONSUMED_INPUTS.get(stage_key, []))
+    return "Stage %s attempt budget exhausted for stage input identity %s (%s/%s attempts used%s); a new allowance requires a change to its consumed inputs (%s)" % (
+        stage_key, identity, attempts_used, attempt_budget,
+        ", last failure: %s" % after if after else "", inputs,
+    )
+
+
+def stage7_budget_exhausted_reason(review_input_identity, attempts_used, attempt_budget):
+    """F03-FR5: an exhausted review identity has no approval route."""
+    return (
+        "Stage 7 attempt budget exhausted for review-input identity %s (%s/%s attempts used); "
+        "a new allowance requires a source, review-input, review-config, or bound Stage 6 change"
+    ) % (review_input_identity, attempts_used, attempt_budget)
+
+
+def stage_attempt_allowance(task_dir, config, stage_key):
+    """F02/F03: attempts left for the stage's current input identity, counted
+    from durable dispatch records; None for stages without one."""
+    identity = attempts_module.current_stage_input_identity(task_dir, stage_key)
+    if identity is None:
+        return None
+    used = attempts_module.count_stage_input_attempts(task_dir, stage_key, identity)
+    return live_allowance(identity, used, int(config.get("stage_attempt_budget", 2)), stage_key)
+
+
+def live_allowance(identity, attempts_used, attempt_budget, stage_key=None):
+    if identity is None:
+        return None
+    return {
+        "stage": stage_key,
+        "identity": identity,
+        "attempts_used": attempts_used,
+        "attempts_allowed": attempt_budget,
+        "exhausted": attempts_used >= attempt_budget,
+    }
+
+
+def approval_attempt_allowance(task_dir, config, pending):
+    """The allowance a pending approval would dispatch against.
+
+    Only a failed-writer approval draws on the stage input identity budget;
+    human-approved max-turn retries keep their own semantics.
+    """
+    if pending.get("retry_type") != "failed_write_source_change":
+        return None
+    return stage_attempt_allowance(task_dir, config, pending.get("stage"))
+
+
+def exhausted_writer_reason(stage_key, changes, comparison_error, allowance):
+    """F03-FR1: why no failed-writer approval exists and how to get one."""
+    if changes:
+        paths = []
+        for item in changes:
+            path = item.get("path") if isinstance(item, dict) else item
+            if path and path not in paths:
+                paths.append(path)
+        what = "a failed write-capable attempt changed source: %s" % ", ".join(paths)
+    else:
+        what = "source comparison is unavailable after a failed write-capable attempt, so changed paths are uncertain (%s)" % (comparison_error or "unknown")
+    return "Stage %s %s; further writers are blocked and no retry approval was created because %s" % (
+        stage_key, what,
+        stage_budget_exhausted_reason(stage_key, allowance["identity"], allowance["attempts_used"], allowance["attempts_allowed"]),
+    )
+
+
+def withdraw_pending_approval(task_dir, state, reason):
+    """F03-FR3/FR4: retire an unconsumed approval durably, keeping history."""
+    pending = state.get("pending_approval")
+    if not pending:
+        return None
+    withdrawn = dict(pending)
+    withdrawn["withdrawn"] = True
+    withdrawn["withdrawn_at"] = now()
+    withdrawn["withdrawn_reason"] = reason
+    state.setdefault("approval_history", []).append(withdrawn)
+    state["pending_approval"] = None
+    write_state_atomic(task_dir, state)
+    append_log(task_dir, {"event": "approval_withdrawn", "stage": withdrawn.get("stage"), "approval_id": withdrawn.get("approval_id"), "reason": reason, "run_id": state.get("run_id")})
+    return withdrawn
+
+
+def block_after_recovery(task_dir, state, stage_key, recovery_error):
+    """Block for a recovery error unless recovery already set the outcome."""
+    if state.get("state") == "awaiting_retry_approval":
+        return
+    if state.get("state") == "blocked" and (state.get("last_failure") or {}).get("reason") == recovery_error:
+        return
+    block_transition(task_dir, state, stage_key, "durable recovery blocked: " + recovery_error, FAILURE_CLASS_STAGE5_AMBIGUITY)
 
 
 def invoke_stage(task_dir, state, config, stage_key, execution_mode, agent, pass_number, completion_for=None, attempt_number=1, attempt_kind="normal", retry_reason="initial/no-retry", extra_context=None, review_input_identity=None):
@@ -2148,9 +2310,13 @@ def writer_source_changes(task_dir, before):
         return None, str(exc)
 
 
-def failed_writer_requires_approval(task_dir, state, stage_key, execution_mode, agent, result, failure_class):
+def failed_writer_requires_approval(task_dir, state, stage_key, execution_mode, agent, result, failure_class, allowance=None):
     """Block a second writer when a failed writer changed source, or when
-    the pre/post source comparison cannot be trusted."""
+    the pre/post source comparison cannot be trusted.
+
+    F03-FR1: when the stage input identity has no attempt left, no approval
+    is created; the writer stays unresolved and the task blocks instead.
+    """
     if execution_mode != "workspace-write":
         return False
     before = result.get("_source_before")
@@ -2167,6 +2333,12 @@ def failed_writer_requires_approval(task_dir, state, stage_key, execution_mode, 
     result["failed_writer_source_changes"] = changes
     if comparison_error is not None:
         result["failed_writer_source_comparison_error"] = comparison_error
+    if allowance is not None and allowance["exhausted"]:
+        reason = exhausted_writer_reason(stage_key, changes, comparison_error, allowance)
+        block_transition(task_dir, state, stage_key, reason, failure_class or FAILURE_CLASS_UNKNOWN_FAILURE)
+        write_state_atomic(task_dir, state)
+        append_log(task_dir, {"event": "failed_writer_blocked_without_allowance", "stage": stage_key, "attempt": result.get("attempt_number"), "stage_input_identity": allowance["identity"], "source_changes": changes, "comparison_error": comparison_error, "run_id": state.get("run_id")})
+        return True
     detail = "source changed after failed write-capable attempt" if changes else "source comparison is unavailable after failed write-capable attempt"
     require_retry_approval(
         state,
@@ -2186,27 +2358,51 @@ def failed_writer_requires_approval(task_dir, state, stage_key, execution_mode, 
     return True
 
 
-def recover_failed_writer_approval(task_dir, state, dispatch, completed):
-    """Recreate approval lost after a failed writer's durable completion."""
+def recover_failed_writer_approval(task_dir, state, config, dispatch, completed, defer_if_upstream_stale=False):
+    """Recreate approval lost after a failed writer's durable completion.
+
+    F03: an approval is recreated only while the stage input identity has an
+    attempt left.  Otherwise any matching pending approval is withdrawn, the
+    writer stays unresolved, and the task blocks.  The pipeline-level pass
+    defers that block while an upstream stage will be redispatched first,
+    because the redispatch may produce a new identity with an allowance; the
+    stage-level pass immediately before any writer dispatch never defers.
+    """
     pending = state.get("pending_approval") or {}
     attempt_id = dispatch.get("attempt_id")
+    stage_key = dispatch.get("stage")
+    allowance = stage_attempt_allowance(task_dir, config, stage_key)
+    exhausted = allowance is not None and allowance["exhausted"]
     if (pending.get("failed_attempt_id") == attempt_id or
-            (pending.get("stage") == dispatch.get("stage") and
+            (pending.get("stage") == stage_key and
              pending.get("failed_attempt_number") == dispatch.get("attempt_number"))):
-        if pending.get("approved") and not pending.get("consumed"):
+        if not exhausted:
+            if pending.get("approved") and not pending.get("consumed"):
+                return None
+            return "failed writer attempt %s is awaiting retry approval" % attempt_id
+        changes = pending.get("failed_source_changes")
+        comparison_error = pending.get("failed_source_comparison_error")
+        withdraw_pending_approval(task_dir, state, "stage %s input identity %s has no attempt left" % (stage_key, allowance["identity"]))
+    else:
+        changes, comparison_error = writer_source_changes(task_dir, dispatch.get("implementation_baseline"))
+        if not changes and comparison_error is None:
+            attempts_module.record_writer_resolution(
+                task_dir, attempt_id, stage_key, "source_unchanged_on_recovery"
+            )
             return None
-        return "failed writer attempt %s is awaiting retry approval" % attempt_id
-    changes, comparison_error = writer_source_changes(task_dir, dispatch.get("implementation_baseline"))
-    if not changes and comparison_error is None:
-        attempts_module.record_writer_resolution(
-            task_dir, attempt_id, dispatch.get("stage"), "source_unchanged_on_recovery"
-        )
-        return None
+    if exhausted:
+        if defer_if_upstream_stale and upstream_staleness(task_dir, state, stage_key)["stale"]:
+            return None
+        reason = exhausted_writer_reason(stage_key, changes, comparison_error, allowance)
+        result = completed.get("result") or {}
+        block_transition(task_dir, state, stage_key, reason, result.get("failure_class") or FAILURE_CLASS_UNKNOWN_FAILURE)
+        write_state_atomic(task_dir, state)
+        return reason
     result = completed.get("result") or {}
     detail = "source changed after failed write-capable attempt" if changes else "source comparison is unavailable after failed write-capable attempt"
     require_retry_approval(
         state,
-        dispatch.get("stage"),
+        stage_key,
         result.get("failure_class") or FAILURE_CLASS_UNKNOWN_FAILURE,
         dispatch.get("agent"),
         detail,

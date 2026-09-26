@@ -91,6 +91,9 @@ class R03FailedWriterApprovalTests(unittest.TestCase):
         self.assertEqual(state["attempts"]["02"], 1)
 
     def test_r03_fr2_invalid_failed_evidence_recreates_approval_and_launches_nothing(self):
+        # F03-FR4: approve-retry checks the same stage budget as the run, so
+        # the operator-facing config must match the budget-2 run below.
+        controller.load_config = lambda: dict(self.config(), stage_attempt_budget=2)
         state = new_state(self.task, "run-r03-fr2")
         baseline = controller.capture_writer_source_baseline(self.task_dir)
         dispatch, _result = self.durable_failed_writer(state, baseline=baseline)

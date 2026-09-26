@@ -57,6 +57,7 @@ def generate_report(task_dir, task, state, usage_entries=None, evidence=None):
         "decision": decision,
         "current_evidence": current,
         "review_attempts": _review_attempts(evidence),
+        "stage_attempts": _stage_attempts(evidence),
         "verification": _verification_summary(task_dir),
         "usage": usage_module.summarize(usage_entries or [], group_by="agent"),
         "reasoning_traces": _reasoning_traces(task_dir),
@@ -120,6 +121,19 @@ def _review_attempts(evidence):
         "attempts_used": int(review.get("attempts_used") or 0),
         "attempts_allowed": int(review.get("attempts_allowed") or 0),
         "reason": review.get("reason"),
+    }
+
+
+def _stage_attempts(evidence):
+    stage = (evidence or {}).get("stage_attempts")
+    if not stage:
+        return None
+    return {
+        "stage": stage.get("stage"),
+        "identity": stage.get("identity"),
+        "attempts_used": int(stage.get("attempts_used") or 0),
+        "attempts_allowed": int(stage.get("attempts_allowed") or 0),
+        "exhausted": bool(stage.get("exhausted")),
     }
 
 
@@ -254,6 +268,12 @@ def render_markdown(report):
     review = report.get("review_attempts") or {}
     lines.append("Review-input identity: %s" % (review.get("identity") or "unavailable (%s)" % (review.get("reason") or "unknown")))
     lines.append("Review attempts: %s/%s used" % (review.get("attempts_used", 0), review.get("attempts_allowed", 0)))
+    stage_attempts = report.get("stage_attempts")
+    if stage_attempts:
+        lines.append("Stage %s attempts: %s/%s used (stage input identity %s)" % (
+            stage_attempts["stage"], stage_attempts["attempts_used"],
+            stage_attempts["attempts_allowed"], stage_attempts["identity"],
+        ))
 
     verification = report.get("verification")
     lines.extend(["", "## Verification", ""])

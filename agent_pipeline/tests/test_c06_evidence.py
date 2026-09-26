@@ -329,7 +329,10 @@ class C06EvidenceTests(unittest.TestCase):
         self.assertEqual(self.dispatches("07"), 2)
         failure = self.state()["last_failure"]["reason"]
         self.assertIn("review-input identity", failure)
-        self.assertIn("approve-retry", failure)
+        # F03-FR5: no approval exists for an exhausted review identity, so
+        # the reason must not point at approve-retry.
+        self.assertNotIn("approve-retry", failure)
+        self.assertIn("a new allowance requires a source, review-input, review-config, or bound Stage 6 change", failure)
 
     def test_fr3_manual_acceptance_drift_preserves_notes_and_requires_new_manual_evidence(self):
         self.start()

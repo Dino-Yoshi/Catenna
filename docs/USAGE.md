@@ -148,7 +148,7 @@ The controller state is one of `failures.VALID_STATES`:
 |-------|---------|-----------------|
 | `ready` | No active run; next work can be resumed. | Use `catenna dry-run` to see the next stage, then `catenna run`. |
 | `running` | A run is or was in progress. | Use `catenna tail`, `catenna status`, and `.orchestrator/runs/*.stdout`; check for an active lock before intervening. |
-| `awaiting_retry_approval` | A bounded expensive retry needs approval. | Inspect `catenna status` or `catenna report`, then run `catenna approve-retry --approval-id <id>` if the retry is intentional. |
+| `awaiting_retry_approval` | A bounded expensive retry needs approval. The controller asks only while an attempt remains for the stage's current input identity. | Inspect `catenna status` or `catenna report`, then run `catenna approve-retry --approval-id <id>` if the retry is intentional. |
 | `awaiting_human_test` | Stage 6 needs manual notes. | Perform task-specific testing, write `06_manual_test_notes.md`, then run `catenna run` again. |
 | `awaiting_final_decision` | Defined state, but not a clear normal real-driver recovery path in current source. | Inspect `status` and `report`, reconcile artifacts, and avoid inventing a recovery step. |
 | `blocked` | The controller stopped on a condition requiring human action. | Read `last_failure` in `status`, inspect artifacts and transcripts, fix the cause, then resume with `run` when appropriate. |
@@ -222,7 +222,8 @@ or uncertain execution remains blocked. Recovery does not replenish attempts
 or approvals, infer success from report text, reset source, or automatically
 retry an uncertain writer. A failed writer that changed—or may have changed—
 source requires explicit approval bound to that attempt and current source
-before another writer can start.
+before another writer can start. When no attempt remains for its input
+identity, no approval is requested (see [Stage attempt allowance](#stage-attempt-allowance)).
 
 ### Manual acceptance with configured checks
 
@@ -239,6 +240,34 @@ source, the same notes proceed. Alternatively, record `Reject` or
 `Needs follow-up`, which never require passing checks. With no configured
 checks, manual-only acceptance works as before.
 
+### Stage attempt allowance
+
+Stages `02`, `03`, `04`, `04_gate`, and `05` count attempts per consumed-input
+identity: a digest of the stage key and the hashes of the task artifacts the
+stage consumed at dispatch. Each distinct identity gets `stage_attempt_budget`
+attempts once. The count comes from durable dispatch records, so repeated
+`run`, resume, crash recovery, or invalidation never refills it, and a crash
+after dispatch does not refund the attempt. Changing a consumed input (for
+example, editing `02_*` before Stage 03) produces a new identity with its own
+allowance; reverting to an earlier, exhausted identity does not. Completion
+retries and approved max-turn retries keep their existing semantics.
+
+When an identity is exhausted, `run` blocks and names the stage, the identity,
+and the attempts used. While blocked on a budget, `status` prints
+`stage_attempts: <stage> used/allowed (stage input identity <id>)` and
+`report` shows the same.
+
+Exhaustion never creates or consumes an approval, and an approval never refills
+a budget. If a failed writer changed source on the last attempt of its
+identity, the block names the changed (or uncertain) paths, says that further
+writers are blocked, and says no retry approval was created. Your source files
+are kept as they are; a new allowance requires a change to the stage's consumed
+inputs, and that new identity still requires source-bound approval before any
+writer runs. A pending approval whose stage has no attempt left is marked
+withdrawn and kept in history; `approve-retry` on it reports the withdrawal
+instead of granting a retry. Use `approve-retry` only when `status` shows a
+pending approval ID.
+
 ### Re-review allowance
 
 Stage 7 attempts are counted per review-input identity: a digest of the
@@ -249,8 +278,10 @@ before dispatch, so repeated `run`, crash recovery, or invalidating the same
 identity again never refills it, and a crash after dispatch does not refund
 the attempt. When an identity is exhausted, `run` blocks and names the identity.
 A source, input, or review-configuration change produces a new identity with
-its own allowance. `approve-retry` applies only when `status` shows a pending
-approval ID; the exhausted-identity block does not currently create one.
+its own allowance. An exhausted review identity creates no approval, and
+`approve-retry` cannot refill it; the block names the identity and says a new
+allowance requires a source, review-input, review-config, or bound Stage 6
+change.
 `status` prints `review_input_identity` and `review_attempts: used/allowed`,
 and `report` shows the same; earlier attempts stay in history and usage.
 
@@ -299,7 +330,7 @@ The default config is `agent_pipeline/config.py::DEFAULT_CONFIG`, loaded from
 | `schema_version` | `2` | `config.validate_config` |
 | `default_safety_mode` | `"strict"` | `controller.choose_real_agent` |
 | `supported_safety_modes` | `["strict", "continuity"]` | `config.validate_config` |
-| `stage_attempt_budget` | `2` | `controller.ensure_real_stage` |
+| `stage_attempt_budget` | `2` attempts per consumed-input identity | `controller.ensure_real_stage` |
 | `max_gate_passes` | `2` | `gates.run_stage4_gate_loop` |
 | `timeout_seconds` | `3600` | `real_runner.invoke_agent` |
 | `roles` | Stage and overseer role map | `config.configured_candidates`, `controller.choose_real_agent`, `controller.run_overseer_or_fallback`, `gates.run_stage4_gate_loop` |

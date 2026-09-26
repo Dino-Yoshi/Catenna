@@ -675,10 +675,23 @@ class ControllerReliabilityTests(unittest.TestCase):
         self.assertIs(selected, cfg)
 
     def test_ensure_real_stage_honors_persisted_attempt_budget(self):
+        # F02-FR2/FR3 changed this expectation: the persisted lifetime
+        # counter state["attempts"] only numbers attempts. The budget is the
+        # durable dispatch count for the current stage input identity.
+        from agent_pipeline import attempts as attempts_module
+
+        class Dispatched(Exception):
+            pass
+
+        def refuse_invoke(*args, **kwargs):
+            raise Dispatched()
+
         with tempfile.TemporaryDirectory() as tmp:
             task = "attempt-budget"
             task_dir = Path(tmp) / task
             task_dir.mkdir(parents=True)
+            for key in ("00", "01"):
+                (task_dir / CONTRACTS[key].filename).write_text(valid_artifact(key), encoding="utf-8")
             state = new_state(task, "run-test")
             state["attempts"]["02"] = 2
             cfg = {
@@ -688,16 +701,34 @@ class ControllerReliabilityTests(unittest.TestCase):
                 "cross_task_cooldowns": {"enabled": False},
                 "cost_control": {"enabled": False},
             }
-            calls = []
             original_invoke = controller.invoke_stage
-            controller.invoke_stage = lambda *args, **kwargs: calls.append(args) or {}
+            controller.invoke_stage = refuse_invoke
             self.addCleanup(lambda: setattr(controller, "invoke_stage", original_invoke))
+
+            with self.assertRaises(Dispatched):
+                controller.ensure_real_stage(task_dir, state, cfg, "02", "read-only", {})
+
+            prompt = task_dir / "prompt.md"
+            prompt.write_text("prompt\n", encoding="utf-8")
+            for number in (3, 4):
+                dispatch = attempts_module.prepare_dispatch(
+                    task_dir, state, "02", "codex", "read-only", 1, number, "normal",
+                    "initial/no-retry", prompt, {}, None, {"model": "fake"},
+                )
+                attempts_module.record_completion(
+                    task_dir, {"attempt_id": dispatch["attempt_id"], "stage": "02", "status": "failed"},
+                    "# malformed\n", {"valid": False}, False,
+                )
+            state = new_state(task, "run-test-resume")
+            calls = []
+            controller.invoke_stage = lambda *args, **kwargs: calls.append(args) or {}
+            identity = attempts_module.current_stage_input_identity(task_dir, "02")
 
             code = controller.ensure_real_stage(task_dir, state, cfg, "02", "read-only", {})
 
             self.assertEqual(code, EXIT_BLOCKED)
             self.assertEqual(calls, [])
-            self.assertEqual(state["last_failure"]["reason"], "attempt budget exhausted")
+            self.assertIn("Stage 02 attempt budget exhausted for stage input identity " + identity, state["last_failure"]["reason"])
 
     def test_forced_stage_pass_uses_fresh_retry_budget_despite_cumulative_attempts(self):
         with tempfile.TemporaryDirectory() as tmp:

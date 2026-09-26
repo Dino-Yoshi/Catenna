@@ -607,7 +607,7 @@ class RealPipelineTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(state["pending_approval"]["stage"], "03")
 
-    def test_real_owner_completed_approved_pending_approval_is_consumed_and_cleared(self):
+    def test_real_owner_completed_approved_pending_approval_is_withdrawn_and_cleared(self):
         state = new_state(self.task, "run-test")
         state["state"] = "awaiting_retry_approval"
         state["completed_stages"] = ["00", "01", "02"]
@@ -623,8 +623,15 @@ class RealPipelineTests(unittest.TestCase):
         self.assertEqual(code, EXIT_SUCCESS)
         self.assertEqual(calls, [])
         self.assertIsNone(state.get("pending_approval"))
+        # F03-FR3: nothing was dispatched, so the approval is withdrawn into
+        # history rather than consumed.
         log_text = (orchestrator_dir(self.task_dir) / "log.jsonl").read_text(encoding="utf-8")
-        self.assertIn("approval_consumed", log_text)
+        self.assertIn("approval_withdrawn", log_text)
+        self.assertNotIn("approval_consumed", log_text)
+        withdrawn = state["approval_history"][-1]
+        self.assertEqual(withdrawn["approval_id"], "retry-owner")
+        self.assertTrue(withdrawn["withdrawn"])
+        self.assertFalse(withdrawn["consumed"])
 
     def test_real_owner_completed_unapproved_pending_approval_blocks_without_clearing(self):
         state = new_state(self.task, "run-test")

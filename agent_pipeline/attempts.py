@@ -2,6 +2,7 @@
 
 from __future__ import print_function
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -16,8 +17,38 @@ from .state import (
 )
 
 
+# F02: agent stages whose attempt budget is granted once per consumed-input
+# identity.  Stage 7 keeps its R02 review-input identity instead.
+BUDGETED_STAGES = ("02", "03", "04", "04_gate", "05")
+
+
 def attempts_root(task_dir):
     return orchestrator_dir(task_dir) / "attempts"
+
+
+def stage_input_identity(stage, consumed_input_hashes):
+    """F02-FR1: digest of the stage key and its dispatch-time consumed inputs.
+
+    Returns None for stages outside BUDGETED_STAGES and for records without
+    consumed-input provenance (F02-FR5).
+    """
+    if stage not in BUDGETED_STAGES or not isinstance(consumed_input_hashes, dict):
+        return None
+    payload = {"stage": stage, "consumed_input_hashes": consumed_input_hashes}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def current_stage_input_identity(task_dir, stage):
+    """The identity a dispatch of `stage` would record now (missing inputs hash as null)."""
+    if stage not in BUDGETED_STAGES:
+        return None
+    hashes = {}
+    for consumed_stage in STAGE_CONSUMED_INPUTS.get(stage, []):
+        path = Path(task_dir) / CONTRACTS[consumed_stage].filename
+        hashes[path.name] = sha256_file(path) if path.is_file() else None
+    return stage_input_identity(stage, hashes)
 
 
 def prepare_dispatch(task_dir, state, stage, agent, mode, pass_number, attempt_number,
@@ -60,6 +91,8 @@ def prepare_dispatch(task_dir, state, stage, agent, mode, pass_number, attempt_n
     }
     if stage == "07":
         dispatch["review_input_identity"] = review_input_identity
+    if stage in BUDGETED_STAGES:
+        dispatch["stage_input_identity"] = stage_input_identity(stage, consumed_input_hashes)
     write_json_exclusive(root / "dispatch.json", dispatch)
     state.setdefault("durable_attempts", {})[attempt_id] = {
         "stage": stage, "attempt_number": attempt_number, "status": "dispatched"
@@ -86,6 +119,34 @@ def count_stage7_attempts(task_dir, review_input_identity):
         dispatch = _load(dispatch_path)
         if (dispatch.get("stage") == "07" and
                 dispatch.get("review_input_identity") == review_input_identity):
+            used += 1
+    return used
+
+
+def count_stage_input_attempts(task_dir, stage, identity):
+    """F02-FR2: attempts used by one stage input identity, from immutable dispatches.
+
+    Every durable dispatch counts, including one whose controller crashed
+    before completion.  The identity is derived from each record's
+    `consumed_input_hashes`, so a dispatch without that provenance counts
+    toward no identity (F02-FR5).  Max-turn completion retries are excluded:
+    the live loop never charges them against the stage budget either.
+    """
+    if not isinstance(identity, str) or not identity:
+        return 0
+    root = attempts_root(task_dir)
+    if not root.exists():
+        return 0
+    used = 0
+    for attempt_dir in root.iterdir():
+        dispatch_path = attempt_dir / "dispatch.json"
+        if not attempt_dir.is_dir() or not dispatch_path.is_file():
+            continue
+        dispatch = _load(dispatch_path)
+        if (dispatch.get("stage") != stage or
+                dispatch.get("attempt_kind") == "completion_only_retry"):
+            continue
+        if stage_input_identity(stage, dispatch.get("consumed_input_hashes")) == identity:
             used += 1
     return used
 
@@ -156,12 +217,18 @@ def invalidate_promoted(task_dir, stage_keys, reason, history_path):
     This must run after the history copy exists and before the canonical files
     are removed.  The sidecar is immutable so recovery cannot later mistake a
     deliberately archived result for an interrupted promotion.
+
+    F04: every un-retired promotion of an invalidated stage is retired, whether
+    the canonical file matched, differed from (e.g. a hand edit), or was
+    missing relative to the promotion.  Otherwise recovery would re-promote the
+    original result over the operator's change.  `history_path` is None when
+    nothing was archived.
     """
     wanted = set(stage_keys)
     root = attempts_root(task_dir)
-    if not root.exists() or history_path is None:
+    if not root.exists():
         return []
-    history_path = Path(history_path)
+    history_path = Path(history_path) if history_path is not None else None
     invalidated = []
     for attempt_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         promoted_path = attempt_dir / "promoted.json"
@@ -171,22 +238,25 @@ def invalidate_promoted(task_dir, stage_keys, reason, history_path):
         stage = promoted.get("stage")
         if stage not in wanted:
             continue
-        archived_path = history_path / CONTRACTS[stage].filename
-        if not archived_path.is_file() or sha256_file(archived_path) != promoted.get("final_hash"):
-            continue
-        # An older promotion can have the same artifact hash as the current
-        # promotion.  Its existing immutable invalidation already makes it
-        # historical; do not try to replace that record with a newer reason.
+        # An existing invalidation already makes this promotion historical;
+        # the immutable record is never replaced with a newer reason.
         if (attempt_dir / "invalidated.json").exists():
             continue
+        archived_path = history_path / CONTRACTS[stage].filename if history_path is not None else None
+        if archived_path is not None and not archived_path.is_file():
+            archived_path = None
+        archived_hash = sha256_file(archived_path) if archived_path is not None else None
+        promoted_hash = promoted.get("final_hash")
         record = {
             "schema_version": 1,
             "attempt_id": promoted.get("attempt_id"),
             "stage": stage,
             "reason": reason,
-            "history_path": str(history_path),
-            "archived_path": str(archived_path),
-            "promoted_hash": promoted.get("final_hash"),
+            "history_path": str(history_path) if history_path is not None else None,
+            "archived_path": str(archived_path) if archived_path is not None else None,
+            "promoted_hash": promoted_hash,
+            "archived_hash": archived_hash,
+            "hash_mismatch": archived_hash != promoted_hash,
         }
         write_json_exclusive(attempt_dir / "invalidated.json", record)
         invalidated.append(promoted.get("attempt_id"))
@@ -201,7 +271,6 @@ def recover(task_dir, state, promote_func, stages=None, failed_writer_recovery=N
     wanted = set(stages) if stages is not None else None
     records = []
     all_completed = []
-    current_dispatch_stages = set()
     for attempt_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         try:
             dispatch = _load(attempt_dir / "dispatch.json")
@@ -235,10 +304,6 @@ def recover(task_dir, state, promote_func, stages=None, failed_writer_recovery=N
         except Exception as exc:
             return "attempt completion record is unreadable: %s" % exc
         all_completed.append({"dispatch": dispatch, "completed": completed, "dir": attempt_dir})
-        recorded_hashes = dispatch.get("consumed_input_hashes")
-        provenance_complete, inputs_match = _dispatch_inputs_match(task_dir, stage, recorded_hashes)
-        if provenance_complete and inputs_match:
-            current_dispatch_stages.add(stage)
         if not completed.get("eligible_for_promotion"):
             continue
         promoted = None
@@ -296,7 +361,6 @@ def recover(task_dir, state, promote_func, stages=None, failed_writer_recovery=N
         newest_promoted_attempt[stage] = max(number, newest_promoted_attempt.get(stage, -1))
 
     successful = {}
-    stale_success_stages = set()
     for item in records:
         dispatch = item["dispatch"]
         completed = item["completed"]
@@ -313,7 +377,6 @@ def recover(task_dir, state, promote_func, stages=None, failed_writer_recovery=N
         if not provenance_complete:
             return "attempt %s lacks complete dispatch-time input provenance" % dispatch.get("attempt_id")
         if not inputs_match:
-            stale_success_stages.add(stage)
             continue
         result_path = Path(completed.get("result_path", ""))
         if not result_path.is_file() or sha256_file(result_path) != completed.get("result_hash"):
@@ -335,17 +398,6 @@ def recover(task_dir, state, promote_func, stages=None, failed_writer_recovery=N
             "dispatch": dispatch, "completed": completed, "output": output,
             "dir": attempt_dir, "consumed_input_hashes": recorded_hashes,
         }
-
-    # A changed input identity receives the ordinary stage budget once.  Keep
-    # total attempt numbers intact, but tell ensure_real_stage that no attempt
-    # has yet been dispatched for this new identity.  The marker is removed
-    # before the next dispatch is persisted, so a failed current-input attempt
-    # cannot refill its budget on resume.
-    fresh = set(state.get("_r01_fresh_input_stages") or [])
-    considered = wanted if wanted is not None else set(STAGE_CONSUMED_INPUTS)
-    fresh.difference_update(considered)
-    fresh.update(stale_success_stages - current_dispatch_stages)
-    state["_r01_fresh_input_stages"] = sorted(fresh)
 
     changed = False
     for stage, item in successful.items():

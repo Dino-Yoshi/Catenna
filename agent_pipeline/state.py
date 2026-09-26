@@ -153,6 +153,33 @@ def append_log(task_dir, event):
 
 
 def reconcile_artifacts(task_dir, state, read_only=False):
+    view = artifact_view(task_dir, state, read_only=read_only)
+    previous_hashes = view["previous_hashes"]
+    invalidated = view["invalidated"]
+    completed = view["completed"]
+    state["artifact_status"] = view["artifact_status"]
+    if not read_only:
+        if invalidated:
+            state["input_hashes"] = previous_hashes
+        elif not previous_hashes or view["stale_from"] or set(completed) == set(STAGE_ORDER):
+            state["input_hashes"] = view["current_hashes"]
+    state["completed_stages"] = completed
+    state["current_stage"] = view["current_stage"]
+    if state["current_stage"] is None:
+        state["state"] = "complete"
+    elif state.get("state") == "complete":
+        state["state"] = "ready"
+    return invalidated
+
+
+def artifact_view(task_dir, state, read_only=True):
+    """The reconcile rule, computed without mutating `state`.
+
+    An artifact whose hash differs from its acknowledged hash invalidates every
+    stage downstream of it; completion is the contiguous run of structurally
+    valid, non-invalidated artifacts, and `current_stage` is the first stage
+    `run` would dispatch.
+    """
     previous_hashes = dict(state.get("input_hashes") or {})
     artifact_status = {}
     current_hashes = {}
@@ -189,19 +216,49 @@ def reconcile_artifacts(task_dir, state, read_only=False):
                 artifact_status[filename]["stale"] = True
     effectively_valid = [key for key in structurally_valid if key not in invalidated]
     completed = contiguous_completed(effectively_valid)
-    state["artifact_status"] = artifact_status
-    if not read_only:
-        if invalidated:
-            state["input_hashes"] = previous_hashes
-        elif not previous_hashes or stale_from or set(completed) == set(STAGE_ORDER):
-            state["input_hashes"] = current_hashes
-    state["completed_stages"] = completed
-    state["current_stage"] = next_stage(completed)
-    if state["current_stage"] is None:
-        state["state"] = "complete"
-    elif state.get("state") == "complete":
-        state["state"] = "ready"
-    return invalidated
+    return {
+        "previous_hashes": previous_hashes,
+        "current_hashes": current_hashes,
+        "artifact_status": artifact_status,
+        "stale_from": stale_from,
+        "invalidated": invalidated,
+        "completed": completed,
+        "current_stage": next_stage(completed),
+    }
+
+
+def upstream_staleness(task_dir, state, before_stage):
+    """Read-only: whether the task artifacts upstream of `before_stage` still
+    match the chain the controller acknowledged (F01).
+
+    Returns the offending artifacts (missing, invalid, unacknowledged, or
+    changed since acknowledgement) and the first stage `run` would dispatch,
+    both derived from `artifact_view`, the same rule `reconcile_artifacts`
+    applies.
+    """
+    view = artifact_view(task_dir, state, read_only=True)
+    acknowledged = view["previous_hashes"]
+    upstream = STAGE_ORDER[:STAGE_ORDER.index(before_stage)]
+    problems = []
+    for key in upstream:
+        filename = CONTRACTS[key].filename
+        detail = view["artifact_status"].get(filename) or {}
+        recorded = acknowledged.get(filename)
+        if detail.get("status") == "missing":
+            problems.append((filename, "missing"))
+        elif not isinstance(recorded, str):
+            problems.append((filename, "unacknowledged"))
+        elif detail.get("hash") != recorded:
+            problems.append((filename, "changed"))
+        elif detail.get("status") != "valid":
+            problems.append((filename, "invalid: %s" % detail.get("reason")))
+    redispatch = view["current_stage"]
+    precedes = redispatch in upstream
+    return {
+        "stale": bool(problems) or precedes,
+        "artifacts": problems,
+        "redispatch_stage": redispatch,
+    }
 
 
 def acknowledge_consumed_inputs(task_dir, state, stage_key):

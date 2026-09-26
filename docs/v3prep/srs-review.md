@@ -14,7 +14,7 @@ Efficiency means less wasted work per accepted task, not simply a cheaper model 
 
 | Section | Slices | Developer outcome | Required exit gate |
 | --- | --- | --- | --- |
-| V2 cleanup | C01–C09, R01–R08 | Decisions and recovery cannot silently authorize unsafe or stale work. | All A1–A8 and D1–D8 regressions, cleanup requirement evidence, and integration suites pass (gate reopened 2026-09-25). |
+| V2 cleanup | C01–C09, R01–R08 | Decisions and recovery cannot silently authorize unsafe or stale work. | All A1–A8 and D1–D8 regressions, cleanup requirement evidence, and integration suites pass (gate closed 2026-09-25); follow-up slices F01–F05 must also close their [follow-up gate](v2-cleanup-followups-gate.md) against a commit. |
 | V3 milestone 1 | V00–V02 | Installable CLI with explicit lifecycle, storage, compatibility, and resource contracts. | Clean installed-package checks and foundation requirement evidence pass. |
 | V3 milestone 2 | V03–V08 | Create, prepare, run, verify, correct, and export a task without editing internal state. | End-to-end developer examples and all local-workflow requirement checks pass. |
 | V3 milestone 3 | V09–V12 | Effective provider controls, bounded execution, measured profile tradeoffs, and trustworthy CI consumption. | Adapter/budget/profile/CI checks pass and the comparative evaluation is recorded. |

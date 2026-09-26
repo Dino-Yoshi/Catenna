@@ -104,7 +104,10 @@ class R02ReviewBudgetTests(unittest.TestCase):
         self.assertEqual(after_repeat, after_first)
         exhausted = load_state(self.task_dir, self.task)
         self.assertIn(failed_identity, exhausted["last_failure"]["reason"])
-        self.assertIn("approve-retry", exhausted["last_failure"]["reason"])
+        # F03-FR5: the exhaustion reason names the identity and how a new
+        # allowance is obtained, never approve-retry.
+        self.assertNotIn("approve-retry", exhausted["last_failure"]["reason"])
+        self.assertIn("review-config", exhausted["last_failure"]["reason"])
 
         newer = copy.deepcopy(changed)
         newer["turn_budgets"]["07"] = 7
