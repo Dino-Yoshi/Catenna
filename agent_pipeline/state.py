@@ -7,6 +7,7 @@ import os
 import time
 
 from .artifacts import CONTRACTS, sha256_file, validate_file
+from .durable import DurableStorageError, atomic_write_json
 from .failures import VALID_STATES
 
 SCHEMA_VERSION = 2
@@ -134,23 +135,21 @@ def migrate_v1_to_v2(data):
 
 
 def write_state_atomic(task_dir, state):
-    directory = orchestrator_dir(task_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = state_path(task_dir)
-    tmp = directory / ("state.json.tmp.%d" % os.getpid())
-    with open(str(tmp), "w", encoding="utf-8") as handle:
-        json.dump(state, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.replace(str(tmp), str(path))
+    atomic_write_json(state_path(task_dir), state)
 
 
 def append_log(task_dir, event):
     directory = orchestrator_dir(task_dir)
-    directory.mkdir(parents=True, exist_ok=True)
     payload = dict(event)
     payload.setdefault("timestamp", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-    with open(str(directory / "log.jsonl"), "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with open(str(directory / "log.jsonl"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception as exc:
+        raise DurableStorageError("cannot durably append controller log: %s" % exc)
 
 
 def reconcile_artifacts(task_dir, state, read_only=False):
@@ -217,6 +216,17 @@ def acknowledge_consumed_inputs(task_dir, state, stage_key):
         acknowledged.append(consumed_stage)
     state["input_hashes"] = input_hashes
     return acknowledged
+
+
+def acknowledge_recorded_consumed_inputs(state, recorded_hashes):
+    """Acknowledge hashes already captured by an immutable dispatch record.
+
+    Recovery must not turn whatever happens to be on disk at resume time into
+    the inputs a completed attempt is said to have consumed.
+    """
+    input_hashes = dict(state.get("input_hashes") or {})
+    input_hashes.update(dict(recorded_hashes or {}))
+    state["input_hashes"] = input_hashes
 
 
 def contiguous_completed(valid_stage_keys):

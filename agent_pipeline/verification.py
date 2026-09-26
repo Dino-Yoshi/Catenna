@@ -16,18 +16,24 @@ from __future__ import print_function
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from .locking import lock_path, pid_live
-from .real_runner import run_to_files, write_json_atomic
+from .locking import LockError, lock_path, pid_live, record_managed_child, record_managed_child_launch_state, validate_execution_ownership
+from .real_runner import ManagedProcessInterrupted, run_to_files, write_json_atomic
+from .source_identity import SourceIdentityError, capture_source_identity, format_identity, same_identity, with_identity_change
 from .state import orchestrator_dir
 
 
 class VerificationError(Exception):
+    pass
+
+
+class ExecutionOwnershipError(VerificationError):
     pass
 
 
@@ -61,10 +67,8 @@ def _write_check_sidecar(stdout_path, result):
     write_json_atomic(Path(stdout_path).with_suffix(".json"), result)
 
 
-def _write_running_check_sidecar(stdout_path, name, argv, started_at):
-    write_json_atomic(
-        Path(stdout_path).with_suffix(".json"),
-        {
+def _write_running_check_sidecar(stdout_path, name, argv, started_at, run_id=None):
+    record = {
             "name": name,
             "status": "running",
             "command": list(argv),
@@ -73,8 +77,59 @@ def _write_running_check_sidecar(stdout_path, name, argv, started_at):
             "started_at": started_at,
             "stdout_path": str(stdout_path),
             "stderr_path": str(Path(stdout_path).with_suffix(".stderr")),
-        },
-    )
+            "run_id": run_id,
+        }
+    write_json_atomic(Path(stdout_path).with_suffix(".json"), record)
+
+
+def _check_launch_callback(stdout_path, running_record, task_dir, repo_root, run_id, launched):
+    def launched_child(identity):
+        launched.update(identity)
+        record = dict(running_record)
+        record["managed_child"] = dict(identity)
+        write_json_atomic(Path(stdout_path).with_suffix(".json"), record)
+        if task_dir is not None and run_id is not None:
+            record_managed_child(task_dir, repo_root, run_id, identity)
+    return launched_child
+
+
+def _check_launch_state_callback(task_dir, repo_root, run_id, state):
+    def record_state():
+        if task_dir is not None and run_id is not None:
+            record_managed_child_launch_state(task_dir, repo_root, run_id, state)
+    return record_state
+
+
+def _finish_check_result(result, launched):
+    if launched:
+        result["managed_child"] = dict(launched)
+    if result.get("exit_code") in (-int(signal.SIGINT), -int(signal.SIGTERM)):
+        result["interrupted"] = True
+        result["partial"] = True
+    return result
+
+
+def _interrupted_check_result(name, argv, stdout_path, stderr_path, started, launched, exc):
+    result = {
+        "name": name,
+        "status": "interrupted",
+        "exit_code": -int(exc.signum),
+        "timed_out": False,
+        "duration_seconds": time.time() - started,
+        "command": list(argv),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "interrupted": True,
+        "partial": True,
+    }
+    _finish_check_result(result, launched)
+    _write_check_sidecar(stdout_path, result)
+    exc.result = result
+    return result
+
+
+def _not_attempted_check(name, argv, reason="not attempted because verification was interrupted"):
+    return {"name": name, "status": "not_attempted", "command": list(argv), "reason": reason}
 
 
 def check_concurrency_guard(task_dir, allow_pid=None):
@@ -106,14 +161,20 @@ def check_concurrency_guard(task_dir, allow_pid=None):
         )
 
 
-def run_unit_tests(repo_root, runs_dir, timeout_seconds=600):
+def run_unit_tests(repo_root, runs_dir, timeout_seconds=600, task_dir=None, run_id=None):
     stamp = run_stamp()
     stdout_path = runs_dir / ("unit_tests-%s.stdout" % stamp)
     stderr_path = runs_dir / ("unit_tests-%s.stderr" % stamp)
     argv = [python_executable()] + UNIT_TEST_ARGS
     started = time.time()
-    _write_running_check_sidecar(stdout_path, "unit_tests", argv, started)
-    exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=PACKAGE_ROOT)
+    _write_running_check_sidecar(stdout_path, "unit_tests", argv, started, run_id=run_id)
+    running = json.loads(Path(stdout_path).with_suffix(".json").read_text(encoding="utf-8"))
+    launched = {}
+    try:
+        exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=PACKAGE_ROOT, run_id=run_id, on_launch_identity=_check_launch_callback(stdout_path, running, task_dir, repo_root, run_id, launched), on_before_launch=_check_launch_state_callback(task_dir, repo_root, run_id, "launch_pending"), on_launch_failed=_check_launch_state_callback(task_dir, repo_root, run_id, "launch_failed"))
+    except ManagedProcessInterrupted as exc:
+        _interrupted_check_result("unit_tests", argv, stdout_path, stderr_path, started, launched, exc)
+        raise
     duration = time.time() - started
     summary = parse_unittest_summary(safe_read(stderr_path))
     status = "passed" if exit_code == 0 and not timed_out else "failed"
@@ -128,18 +189,25 @@ def run_unit_tests(repo_root, runs_dir, timeout_seconds=600):
         "stderr_path": str(stderr_path),
         "summary": summary,
     }
+    _finish_check_result(result, launched)
     _write_check_sidecar(stdout_path, result)
     return result
 
 
-def run_mock_pipeline(repo_root, runs_dir, timeout_seconds=120):
+def run_mock_pipeline(repo_root, runs_dir, timeout_seconds=120, task_dir=None, run_id=None):
     stamp = run_stamp()
     stdout_path = runs_dir / ("mock_pipeline-%s.stdout" % stamp)
     stderr_path = runs_dir / ("mock_pipeline-%s.stderr" % stamp)
     argv = [python_executable()] + MOCK_PIPELINE_ARGS
     started = time.time()
-    _write_running_check_sidecar(stdout_path, "mock_pipeline", argv, started)
-    exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=PACKAGE_ROOT)
+    _write_running_check_sidecar(stdout_path, "mock_pipeline", argv, started, run_id=run_id)
+    running = json.loads(Path(stdout_path).with_suffix(".json").read_text(encoding="utf-8"))
+    launched = {}
+    try:
+        exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=PACKAGE_ROOT, run_id=run_id, on_launch_identity=_check_launch_callback(stdout_path, running, task_dir, repo_root, run_id, launched), on_before_launch=_check_launch_state_callback(task_dir, repo_root, run_id, "launch_pending"), on_launch_failed=_check_launch_state_callback(task_dir, repo_root, run_id, "launch_failed"))
+    except ManagedProcessInterrupted as exc:
+        _interrupted_check_result("mock_pipeline", argv, stdout_path, stderr_path, started, launched, exc)
+        raise
     duration = time.time() - started
     status = "passed" if exit_code == 0 and not timed_out else "failed"
     result = {
@@ -152,11 +220,12 @@ def run_mock_pipeline(repo_root, runs_dir, timeout_seconds=120):
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
+    _finish_check_result(result, launched)
     _write_check_sidecar(stdout_path, result)
     return result
 
 
-def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overrides=None):
+def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overrides=None, task_dir=None, run_id=None):
     gradlew = repo_root / "gradlew"
     if not gradlew.exists():
         return {"name": "gradle_" + gradle_task, "status": "not_attempted", "reason": "gradlew not found at repo root"}
@@ -174,8 +243,14 @@ def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overr
         env.update(env_overrides)
     argv = [str(gradlew), "--no-daemon", gradle_task]
     started = time.time()
-    _write_running_check_sidecar(stdout_path, "gradle_" + gradle_task, argv, started)
-    exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=repo_root, env=env)
+    _write_running_check_sidecar(stdout_path, "gradle_" + gradle_task, argv, started, run_id=run_id)
+    running = json.loads(Path(stdout_path).with_suffix(".json").read_text(encoding="utf-8"))
+    launched = {}
+    try:
+        exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=repo_root, env=env, run_id=run_id, on_launch_identity=_check_launch_callback(stdout_path, running, task_dir, repo_root, run_id, launched), on_before_launch=_check_launch_state_callback(task_dir, repo_root, run_id, "launch_pending"), on_launch_failed=_check_launch_state_callback(task_dir, repo_root, run_id, "launch_failed"))
+    except ManagedProcessInterrupted as exc:
+        _interrupted_check_result("gradle_" + gradle_task, argv, stdout_path, stderr_path, started, launched, exc)
+        raise
     duration = time.time() - started
     status = "passed" if exit_code == 0 and not timed_out else "failed"
     result = {
@@ -188,11 +263,12 @@ def run_gradle(repo_root, runs_dir, gradle_task, timeout_seconds=1800, env_overr
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
+    _finish_check_result(result, launched)
     _write_check_sidecar(stdout_path, result)
     return result
 
 
-def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None):
+def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None, task_dir=None, run_id=None):
     checks = []
     for command in driven_project_commands or []:
         name = command["name"]
@@ -202,9 +278,17 @@ def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None)
         argv = list(command["argv"])
         timeout_seconds = command.get("timeout_seconds", DRIVEN_PROJECT_DEFAULT_TIMEOUT_SECONDS)
         started = time.time()
-        _write_running_check_sidecar(stdout_path, "driven_project_" + name, argv, started)
+        _write_running_check_sidecar(stdout_path, "driven_project_" + name, argv, started, run_id=run_id)
+        running = json.loads(Path(stdout_path).with_suffix(".json").read_text(encoding="utf-8"))
+        launched = {}
         try:
-            exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=repo_root)
+            exit_code, timed_out = run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=repo_root, run_id=run_id, on_launch_identity=_check_launch_callback(stdout_path, running, task_dir, repo_root, run_id, launched), on_before_launch=_check_launch_state_callback(task_dir, repo_root, run_id, "launch_pending"), on_launch_failed=_check_launch_state_callback(task_dir, repo_root, run_id, "launch_failed"))
+        except ManagedProcessInterrupted as exc:
+            checks.append(_interrupted_check_result("driven_project_" + name, argv, stdout_path, stderr_path, started, launched, exc))
+            for remaining in (driven_project_commands or [])[len(checks):]:
+                checks.append(_not_attempted_check("driven_project_" + remaining["name"], remaining["argv"]))
+            exc.verification_checks = checks
+            raise
         except OSError as exc:
             stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text(str(exc) + "\n", encoding="utf-8")
@@ -222,6 +306,7 @@ def run_driven_project_checks(repo_root, runs_dir, driven_project_commands=None)
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
         }
+        _finish_check_result(result, launched)
         _write_check_sidecar(stdout_path, result)
         checks.append(result)
     return checks
@@ -713,24 +798,62 @@ def run_verification(
     driven_project_commands=None,
     skip_self_check=False,
     build_implies_compile=False,
+    run_id=None,
+    source_excludes=None,
 ):
     check_concurrency_guard(task_dir, allow_pid=allow_pid)
     runs_dir = verification_runs_dir(task_dir)
+    source_before, source_before_error = capture_identity_or_error(repo_root, source_excludes)
 
     checks = []
+    plan = []
     if not skip_self_check:
-        checks.extend([
-            run_unit_tests(repo_root, runs_dir, timeout_seconds=unit_test_timeout),
-            run_mock_pipeline(repo_root, runs_dir, timeout_seconds=mock_pipeline_timeout),
+        plan.extend([
+            ("unit_tests", [python_executable()] + UNIT_TEST_ARGS, lambda: run_unit_tests(repo_root, runs_dir, timeout_seconds=unit_test_timeout, task_dir=task_dir, run_id=run_id)),
+            ("mock_pipeline", [python_executable()] + MOCK_PIPELINE_ARGS, lambda: run_mock_pipeline(repo_root, runs_dir, timeout_seconds=mock_pipeline_timeout, task_dir=task_dir, run_id=run_id)),
         ])
     if not (build_implies_compile and run_build):
-        checks.append(run_gradle(repo_root, runs_dir, "compileJava", timeout_seconds=gradle_timeout))
+        plan.append(("gradle_compileJava", [str(repo_root / "gradlew"), "--no-daemon", "compileJava"], lambda: run_gradle(repo_root, runs_dir, "compileJava", timeout_seconds=gradle_timeout, task_dir=task_dir, run_id=run_id)))
     if run_build:
-        checks.append(run_gradle(repo_root, runs_dir, "build", timeout_seconds=gradle_timeout))
-    driven_project_checks = run_driven_project_checks(repo_root, runs_dir, driven_project_commands)
-    checks.extend(driven_project_checks)
+        plan.append(("gradle_build", [str(repo_root / "gradlew"), "--no-daemon", "build"], lambda: run_gradle(repo_root, runs_dir, "build", timeout_seconds=gradle_timeout, task_dir=task_dir, run_id=run_id)))
+    for command in driven_project_commands or []:
+        plan.append((
+            "driven_project_" + command["name"],
+            list(command["argv"]),
+            lambda command=command: run_driven_project_checks(repo_root, runs_dir, [command], task_dir=task_dir, run_id=run_id)[0],
+        ))
+    interruption = None
+    for index, (_name, _argv, run_check) in enumerate(plan):
+        try:
+            checks.append(run_check())
+        except ManagedProcessInterrupted as exc:
+            interruption = exc
+            interrupted_checks = getattr(exc, "verification_checks", None)
+            if interrupted_checks:
+                checks.extend(interrupted_checks)
+            elif exc.result is not None:
+                checks.append(exc.result)
+            for remaining_name, remaining_argv, _remaining_run in plan[index + 1:]:
+                checks.append(_not_attempted_check(remaining_name, remaining_argv))
+        if run_id is not None:
+            try:
+                validate_execution_ownership(
+                    task_dir,
+                    repo_root,
+                    run_id,
+                    controller_pid=allow_pid if allow_pid is not None else os.getpid(),
+                )
+            except LockError as exc:
+                raise ExecutionOwnershipError(str(exc))
+        if interruption is not None:
+            break
+    driven_project_checks = [check for check in checks if str(check.get("name", "")).startswith("driven_project_")]
     driven_project_verified = bool(driven_project_checks) and all(check["status"] == "passed" for check in driven_project_checks)
     driven_project_status = driven_project_verification_status(driven_project_commands, driven_project_checks)
+    if interruption is None:
+        source_after, source_after_error = capture_identity_or_error(repo_root, source_excludes)
+    else:
+        source_after, source_after_error = None, "verification was interrupted"
 
     manifest = load_manifest_if_present(task_dir)
     coverage_signal = test_coverage_delta_signal(manifest, repo_root=repo_root)
@@ -748,12 +871,38 @@ def run_verification(
         "driven_project_verified": driven_project_verified,
         "driven_project_verification_reason": driven_project_status["reason"],
         "test_coverage_delta_signal": coverage_signal,
-        "overall_status": overall_status(checks),
+        "overall_status": "interrupted" if interruption is not None else overall_status(checks),
+        "source_identity": source_binding(source_before, source_after, source_before_error, source_after_error),
     }
     paths = write_report(task_dir, report)
     report["report_paths"] = paths
     report["manifest_updated"] = updated_manifest is not None
+    if interruption is not None:
+        interruption.report = report
+        raise interruption
     return report
+
+
+def capture_identity_or_error(repo_root, source_excludes=None):
+    try:
+        return capture_source_identity(repo_root, source_excludes), None
+    except SourceIdentityError as exc:
+        return None, str(exc)
+
+
+def source_binding(before, after, before_error=None, after_error=None):
+    """C06: checks qualify as current only when the source identity captured
+    before them equals the one captured after them."""
+    if before_error or after_error:
+        current = False
+        reason = "source identity unavailable: " + (before_error or after_error)
+    elif not same_identity(before, after):
+        current = False
+        reason = with_identity_change("source identity changed while checks ran", before, after)
+    else:
+        current = True
+        reason = "source identity unchanged across checks"
+    return {"before": before, "after": after, "current": current, "reason": reason}
 
 
 def driven_project_verification_status(driven_project_commands, driven_project_checks):
@@ -815,10 +964,16 @@ def render_markdown(report):
             int(report.get("driven_project_check_count") or 0),
         ),
         "Driven-project verification reason: %s" % report.get("driven_project_verification_reason", "unknown"),
+    ]
+    binding = report.get("source_identity") or {}
+    after = binding.get("after")
+    lines.extend([
+        "Source identity: %s" % (format_identity(after) if isinstance(after, dict) and after.get("fingerprint") else "unavailable"),
+        "Source identity current: **%s** (%s)" % (str(bool(binding.get("current"))).lower(), binding.get("reason", "not recorded")),
         "",
         "## Checks",
         "",
-    ]
+    ])
     for check in report.get("checks", []):
         if "exit_code" in check:
             lines.append(

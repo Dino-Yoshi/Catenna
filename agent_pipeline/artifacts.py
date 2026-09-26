@@ -242,17 +242,16 @@ def validate_text(text, contract, read_only=False):
     sections = collect_sections(lines)
     present_sections = set(sections)
     missing_sections = []
-    if contract.filename == "06_manual_test_notes.md":
-        if "Decision" not in present_sections and "Overall manual result" not in present_sections:
-            missing_sections.append("Decision or Overall manual result")
-    else:
-        for section in contract.sections:
-            if section not in present_sections:
-                missing_sections.append(section)
+    for section in contract.sections:
+        if section not in present_sections:
+            missing_sections.append(section)
     if missing_sections:
+        reason = "missing sections: " + ", ".join(missing_sections)
+        if contract.filename == "06_manual_test_notes.md":
+            reason += "; add exactly one checked Accept, Reject, or Needs follow-up box"
         return {
             "valid": False,
-            "reason": "missing sections: " + ", ".join(missing_sections),
+            "reason": reason,
             "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
     gate_peek = None
@@ -349,13 +348,6 @@ _GATE_LIST_SECTION_KEYS = {
 
 
 def first_empty_required_section(contract, sections, gate=None):
-    if contract.filename == "06_manual_test_notes.md":
-        result_sections = []
-        result_sections.extend(sections.get("Decision", []))
-        result_sections.extend(sections.get("Overall manual result", []))
-        if result_sections and not any(section_body_has_content(section) for section in result_sections):
-            return "Decision or Overall manual result"
-        return None
     gate_list_keys = _GATE_LIST_SECTION_KEYS.get(contract.filename, {})
     for section in contract.sections:
         bodies = sections.get(section, [])
@@ -377,45 +369,41 @@ def section_body_has_content(body_lines):
 
 
 def validate_manual_test_outcome(text):
-    section = extract_last_section(text, ("Decision", "Overall manual result"))
-    if section is None:
+    sections = collect_sections(text.splitlines())
+    decision_sections = sections.get("Decision", [])
+    if not decision_sections:
         return {
             "valid": False,
-            "reason": "missing sections: Decision or Overall manual result",
+            "reason": "missing sections: Decision; add exactly one checked Accept, Reject, or Needs follow-up box",
             "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
-    checked = len(re.findall(r"^\s*[-*+]\s*\[[xX]\]\s+(Accept|Reject|Needs follow-up)\s*$", section, re.M))
-    if checked > 1:
+    if len(decision_sections) != 1:
         return {
             "valid": False,
-            "reason": "exactly one manual decision checkbox must be checked",
+            "reason": "duplicate Decision sections; keep exactly one with one checked Accept, Reject, or Needs follow-up box",
             "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
         }
-    if checked == 1:
-        return {"valid": True, "reason": "valid"}
-    prose_lines = []
-    for raw_line in section.splitlines():
-        line = raw_line.strip()
-        if not line or re.match(r"^[-*+]\s*\[[ xX]\]\s+", line):
-            continue
-        prose_lines.append(line)
-    prose = "\n".join(prose_lines)
-    if explicit_manual_outcome(prose):
+    section = "\n".join(decision_sections[0])
+    checked = re.findall(r"^\s*[-*+]\s*\[[xX]\]\s+(Accept|Reject|Needs follow-up)\s*$", section, re.M)
+    if len(checked) == 1:
         return {"valid": True, "reason": "valid"}
     return {
         "valid": False,
-        "reason": "manual test notes must state an explicit outcome",
+        "reason": "Decision must contain exactly one checked Accept, Reject, or Needs follow-up box; narrative text is not authoritative",
         "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
     }
 
 
 def manual_test_decision(text):
-    """Classify a Stage 6 manual test notes' stated outcome as
-    "accept"/"reject"/"needs_followup". Only meaningful once
-    validate_manual_test_outcome has already confirmed the text states an
-    explicit outcome; returns None in the (should-not-happen-post-validation)
-    case where no outcome can be determined."""
-    section = extract_last_section(text, ("Decision", "Overall manual result")) or ""
+    """Return the single checked choice in the authoritative Decision section.
+
+    Narrative and legacy prose remain readable artifact content, but never
+    provide decision authority.
+    """
+    sections = collect_sections(text.splitlines()).get("Decision", [])
+    if len(sections) != 1:
+        return None
+    section = "\n".join(sections[0])
     checked = re.findall(r"^\s*[-*+]\s*\[[xX]\]\s+(Accept|Reject|Needs follow-up)\s*$", section, re.M)
     if len(checked) == 1:
         label = checked[0]
@@ -424,70 +412,7 @@ def manual_test_decision(text):
         if label == "Needs follow-up":
             return "needs_followup"
         return "accept"
-    prose_lines = []
-    for raw_line in section.splitlines():
-        line = raw_line.strip()
-        if not line or re.match(r"^[-*+]\s*\[[ xX]\]\s+", line):
-            continue
-        prose_lines.append(line)
-    return _manual_outcome_from_prose("\n".join(prose_lines))
-
-
-def _manual_outcome_from_prose(prose):
-    outcomes = set()
-    for unit in _manual_outcome_units(prose):
-        if _unit_has_reject_outcome(unit):
-            outcomes.add("reject")
-        if _unit_has_followup_outcome(unit):
-            outcomes.add("needs_followup")
-        if _unit_has_accept_outcome(unit):
-            outcomes.add("accept")
-    if "reject" in outcomes:
-        return "reject"
-    if "needs_followup" in outcomes:
-        return "needs_followup"
-    if "accept" in outcomes:
-        return "accept"
     return None
-
-
-def _manual_outcome_units(prose):
-    units = []
-    for raw_line in (prose or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = re.split(r"(?<=[.!?])\s+|;\s+", line)
-        units.extend(part.strip() for part in parts if part.strip())
-    return units
-
-
-def _unit_has_reject_outcome(unit):
-    text = unit.lower()
-    if re.search(r"\breject(?:ed|s)?\b", text):
-        return True
-    if re.search(r"\bmanual testing failed\b|\btesting failed\b|\bfailed in (?:manual )?testing\b", text):
-        return True
-    if re.search(r"\bblocked\s+(?:from merging|pending\b)", text):
-        return True
-    return False
-
-
-def _unit_has_followup_outcome(unit):
-    text = unit.lower()
-    if re.search(r"\bno\s+follow[- ]?up\s+(?:needed|required)\b", text):
-        return False
-    return bool(
-        re.search(
-            r"\bneeds?\s+follow[- ]?up\b|\bfollow[- ]?up\s+required\b|\brequires?\s+follow[- ]?up\b",
-            text,
-        )
-    )
-
-
-def _unit_has_accept_outcome(unit):
-    text = unit.lower()
-    return bool(re.search(r"\baccept(?:ed|s)?\b|\bapproved\b|\bpass(?:ed|es)?\b", text))
 
 
 def extract_last_section(text, headings):
@@ -526,10 +451,6 @@ def extract_section(text, headings):
     if not capture and not collected:
         return None
     return "\n".join(collected)
-
-
-def explicit_manual_outcome(prose):
-    return _manual_outcome_from_prose(prose) is not None
 
 
 def useful_partial(text, contract):

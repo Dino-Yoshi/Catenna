@@ -8,12 +8,10 @@ from pathlib import Path
 from .artifacts import CONTRACTS, sha256_file, validate_file
 from .failures import (
     FAILURE_CLASS_MALFORMED_ARTIFACT,
-    FAILURE_CLASS_MAX_TURNS,
     FAILURE_CLASS_STAGE5_AMBIGUITY,
-    FAILURE_CLASS_UNKNOWN_FAILURE,
 )
 from .manifest import validate_manifest
-from .overseer import parse_overseer_candidate
+from .overseer import parse_persisted_handoff
 
 
 def stage5_report_provenance(task_dir, state):
@@ -39,9 +37,9 @@ def stage5_run_matches_report(run, report_path, report_hash, state):
             return False
     if run.get("execution_mode") != "workspace-write":
         return False
-    if run.get("exit_code") not in (0, None):
+    if run.get("exit_code") != 0:
         return False
-    if run.get("failure_class") not in (None, FAILURE_CLASS_MAX_TURNS, FAILURE_CLASS_UNKNOWN_FAILURE):
+    if run.get("failure_class") is not None:
         return False
     candidate = Path(run.get("candidate_artifact_path"))
     if not candidate.exists() or not candidate.is_file():
@@ -114,7 +112,7 @@ def stage5_postprocessing_complete(task_dir, state, report_func=stage5_report_pr
         if Path(recorded) != expected or not expected.exists():
             return {"valid": False, "reason": "Stage 5 handoff path is missing or inconsistent: " + key, "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     try:
-        parse_overseer_candidate(json.loads(required_paths["json_path"].read_text(encoding="utf-8")))
+        parse_persisted_handoff(json.loads(required_paths["json_path"].read_text(encoding="utf-8")))
     except Exception as exc:
         return {"valid": False, "reason": "Stage 5 supervisor handoff JSON is invalid: " + str(exc), "failure_class": FAILURE_CLASS_STAGE5_AMBIGUITY}
     if state.get("state") != "awaiting_human_test":

@@ -2,12 +2,12 @@
 
 from __future__ import print_function
 
-import json
 import subprocess
 import time
 from pathlib import Path
 
 from .artifacts import sha256_file
+from .durable import atomic_write_json
 
 
 VERIFICATION_STATUSES = set(["passed", "failed", "blocked", "not_attempted"])
@@ -16,6 +16,7 @@ VERIFICATION_STATUSES = set(["passed", "failed", "blocked", "not_attempted"])
 def capture_dirty_baseline(repo_root):
     entries = git_status(repo_root)
     hashes = {}
+    modes = {}
     for entry in entries:
         path = entry_path(entry)
         if not path:
@@ -23,7 +24,8 @@ def capture_dirty_baseline(repo_root):
         full = repo_root / path
         if full.exists() and full.is_file():
             hashes[path] = sha256_file(full)
-    return {"captured_at": now(), "entries": entries, "hashes": hashes}
+            modes[path] = full.stat().st_mode & 0o111
+    return {"captured_at": now(), "entries": entries, "hashes": hashes, "modes": modes}
 
 
 def changed_files_since(repo_root, baseline):
@@ -34,6 +36,7 @@ def changed_files_since(repo_root, baseline):
         if path:
             before_paths.add(path)
     before_hashes = baseline.get("hashes", {})
+    before_modes = baseline.get("modes", {})
     after_entries = git_status(repo_root)
     after_paths = set()
     for entry in after_entries:
@@ -45,6 +48,7 @@ def changed_files_since(repo_root, baseline):
         full = repo_root / path
         before_present = path in before_paths
         after_hash = sha256_file(full) if full.exists() and full.is_file() else None
+        after_mode = (full.stat().st_mode & 0o111) if full.exists() and full.is_file() else None
         if not before_present:
             # Means "not present in the Stage 5 dirty baseline" (e.g. a
             # newly created file, or a tracked-but-clean file that only
@@ -55,6 +59,8 @@ def changed_files_since(repo_root, baseline):
             changed.append({"path": path, "reason": "status_changed_after_stage5"})
         elif before_hashes.get(path) != after_hash:
             changed.append({"path": path, "reason": "pre_dirty_hash_changed_during_stage5"})
+        elif path in before_modes and before_modes.get(path) != after_mode:
+            changed.append({"path": path, "reason": "executable_mode_changed_during_stage5"})
     for path in sorted(before_paths - after_paths):
         full = repo_root / path
         before_hash = before_hashes.get(path)
@@ -86,7 +92,7 @@ def write_manifest(task_dir, repo_root, state, stage5_result, baseline):
     }
     validate_manifest(manifest)
     path = task_dir / "05_implementation_manifest.json"
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_json(path, manifest)
     state["manifest"] = {"path": str(path), "status": "generated", "generated_at": manifest["generated_at"]}
     return manifest
 

@@ -7,6 +7,7 @@ import os
 import time
 
 from .artifacts import CONTRACTS, validate_file
+from .durable import atomic_write_text
 from .state import orchestrator_dir
 
 
@@ -40,8 +41,7 @@ def atomic_finalize(task_dir, stage_key, output, read_only=False):
     destination = task_dir / contract.filename
     task_dir.mkdir(parents=True, exist_ok=True)
     temp_path = task_dir / (contract.filename + ".candidate.%d" % os.getpid())
-    with open(str(temp_path), "w", encoding="utf-8") as handle:
-        handle.write(output)
+    atomic_write_text(temp_path, output)
     validation = validate_file(temp_path, stage_key, read_only=read_only)
     if not validation["valid"]:
         failed = preserve_failed(
@@ -56,5 +56,9 @@ def atomic_finalize(task_dir, stage_key, output, read_only=False):
         except OSError:
             pass
         return {"finalized": False, "validation": validation, "failed_path": failed}
-    os.replace(str(temp_path), str(destination))
+    atomic_write_text(destination, output)
+    try:
+        os.unlink(str(temp_path))
+    except OSError:
+        pass
     return {"finalized": True, "validation": validation, "path": str(destination)}

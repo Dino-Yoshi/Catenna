@@ -2,7 +2,7 @@ from __future__ import print_function
 
 import unittest
 
-from agent_pipeline.artifacts import CONTRACTS, explicit_manual_outcome, manual_test_decision, parse_gate, validate_text
+from agent_pipeline.artifacts import CONTRACTS, manual_test_decision, parse_gate, validate_text
 from agent_pipeline.mock_agent import gate_artifact, valid_artifact
 
 
@@ -93,30 +93,36 @@ class ArtifactValidationTests(unittest.TestCase):
 
     def test_stage_6_accepts_standard_task_list_markers(self):
         star = manual_notes("Decision", "- [ ] Accept\n- [ ] Reject\n* [x] Needs follow-up")
-        plus = manual_notes("Overall manual result", "+ [X] Reject")
+        plus = manual_notes("Decision", "+ [X] Reject")
 
         self.assertTrue(validate_text(star, CONTRACTS["06"])["valid"])
         self.assertTrue(validate_text(plus, CONTRACTS["06"])["valid"])
 
-    def test_stage_6_result_heading_body_is_required_for_both_variants(self):
-        for heading in ("Decision", "Overall manual result"):
-            result = validate_text(manual_notes(heading, "  \n\t"), CONTRACTS["06"])
-            self.assertFalse(result["valid"])
-            self.assertEqual(result["reason"], "section has no body content: Decision or Overall manual result")
+    def test_stage_6_decision_heading_body_is_required(self):
+        result = validate_text(manual_notes("Decision", "  \n\t"), CONTRACTS["06"])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "section has no body content: Decision")
 
     def test_stage_6_rejects_duplicate_checked_outcome_lines(self):
         text = manual_notes("Decision", "- [x] Accept\n* [X] Accept\n+ [ ] Reject")
         result = validate_text(text, CONTRACTS["06"])
 
         self.assertFalse(result["valid"])
-        self.assertEqual(result["reason"], "exactly one manual decision checkbox must be checked")
+        self.assertIn("exactly one checked", result["reason"])
 
-    def test_stage_6_accepts_clear_outcome_prose(self):
-        decision = manual_notes("Decision", "Manual verification passed.")
-        overall = manual_notes("Overall manual result", "Blocked pending a clean review environment.")
-
-        self.assertTrue(validate_text(decision, CONTRACTS["06"])["valid"])
-        self.assertTrue(validate_text(overall, CONTRACTS["06"])["valid"])
+    def test_stage_6_prose_only_notes_require_checkbox_correction(self):
+        cases = [
+            manual_notes("Decision", "Manual verification passed."),
+            manual_notes("Decision", "Not approved."),
+            manual_notes("Decision", "Tests did not pass."),
+            manual_notes("Decision", "Do not accept this change."),
+            manual_notes("Overall manual result", "Approved."),
+        ]
+        for text in cases:
+            result = validate_text(text, CONTRACTS["06"])
+            self.assertFalse(result["valid"], text)
+            self.assertIn("Decision", result["reason"])
+            self.assertIsNone(manual_test_decision(text), text)
 
     def test_stage_6_checkbox_parsing_is_scoped_to_result_section(self):
         text = (
@@ -128,9 +134,9 @@ class ArtifactValidationTests(unittest.TestCase):
         )
         result = validate_text(text, CONTRACTS["06"])
         self.assertFalse(result["valid"])
-        self.assertEqual(result["reason"], "manual test notes must state an explicit outcome")
+        self.assertIn("exactly one checked", result["reason"])
 
-    def test_stage_6_uses_last_result_section(self):
+    def test_stage_6_rejects_duplicate_decision_sections(self):
         text = (
             "# Stage 6 - Manual test notes\n\n"
             "## Decision\n\n"
@@ -143,14 +149,17 @@ class ArtifactValidationTests(unittest.TestCase):
             "* [x] Needs follow-up\n"
         )
 
-        self.assertTrue(validate_text(text, CONTRACTS["06"])["valid"])
+        result = validate_text(text, CONTRACTS["06"])
+        self.assertFalse(result["valid"])
+        self.assertIn("duplicate Decision sections", result["reason"])
+        self.assertIsNone(manual_test_decision(text))
 
     def test_stage_6_unchecked_marker_variants_do_not_count_as_prose(self):
         text = manual_notes("Decision", "* [ ] Accept\n+ [ ] Reject\n- [ ] Needs follow-up")
         result = validate_text(text, CONTRACTS["06"])
 
         self.assertFalse(result["valid"])
-        self.assertEqual(result["reason"], "manual test notes must state an explicit outcome")
+        self.assertIn("exactly one checked", result["reason"])
 
     def test_yaml_gate_parses_multiline_arrays_before_contradiction_check(self):
         text = gate_artifact(
@@ -293,54 +302,29 @@ class ManualTestDecisionTests(unittest.TestCase):
         text = self.section("- [ ] Accept\n- [ ] Reject\n- [x] Needs follow-up")
         self.assertEqual(manual_test_decision(text), "needs_followup")
 
-    def test_prose_accept(self):
-        text = self.section("Tested in-game; the enchant applies correctly. Approved.")
-        self.assertEqual(manual_test_decision(text), "accept")
-
-    def test_prose_reject(self):
-        text = self.section("The tooltip crashed the client. Rejected.")
-        self.assertEqual(manual_test_decision(text), "reject")
-
-    def test_prose_needs_followup(self):
-        text = self.section("Mostly works but needs follow-up on the anvil recipe.")
-        self.assertEqual(manual_test_decision(text), "needs_followup")
-
-    def test_prose_reject_wins_over_accept_mentioned_together(self):
-        text = self.section("Accepted the overall direction but the build failed in testing, so this is rejected.")
-        self.assertEqual(manual_test_decision(text), "reject")
-
-    def test_prose_reject_wins_over_needs_followup_mentioned_together(self):
-        text = self.section("Needs follow-up on docs, but the core change is broken and blocked from merging.")
-        self.assertEqual(manual_test_decision(text), "reject")
-
-    def test_accepting_prose_allows_incidental_negative_words(self):
+    def test_prose_never_determines_a_decision(self):
         cases = [
-            "Accepted. The error path fails cleanly with a clear message.",
-            "Approved. No follow-up needed.",
-            "Manual testing passed. The previously blocked case is now handled.",
-        ]
-        for body in cases:
-            text = self.section(body)
-            self.assertTrue(validate_text(text, CONTRACTS["06"])["valid"], body)
-            self.assertEqual(manual_test_decision(text), "accept", body)
-
-    def test_incidental_only_negative_words_are_not_explicit_outcomes(self):
-        cases = [
-            "The error path fails cleanly with a clear message.",
-            "No follow-up needed.",
-            "The previously blocked case is now handled.",
+            "Approved.",
+            "Rejected.",
+            "Needs follow-up.",
+            "Not approved.",
+            "Tests did not pass.",
+            "Do not accept this change.",
+            "Accepted the direction but rejected the implementation.",
         ]
         for body in cases:
             text = self.section(body)
             result = validate_text(text, CONTRACTS["06"])
             self.assertFalse(result["valid"], body)
-            self.assertEqual(result["reason"], "manual test notes must state an explicit outcome")
+            self.assertIn("narrative text is not authoritative", result["reason"])
             self.assertIsNone(manual_test_decision(text), body)
-            self.assertFalse(explicit_manual_outcome(body), body)
 
-    def test_overall_manual_result_heading_variant(self):
+    def test_legacy_overall_manual_result_requires_decision_section(self):
         text = "# Stage 6 - Manual test notes\n\n## Overall manual result\n\n- [x] Accept\n"
-        self.assertEqual(manual_test_decision(text), "accept")
+        result = validate_text(text, CONTRACTS["06"])
+        self.assertFalse(result["valid"])
+        self.assertIn("missing sections: Decision", result["reason"])
+        self.assertIsNone(manual_test_decision(text))
 
     def test_no_determinable_outcome_returns_none(self):
         text = self.section("Nothing conclusive was written here.")

@@ -37,8 +37,15 @@ def report_dir(task_dir):
     return orchestrator_dir(task_dir)
 
 
-def generate_report(task_dir, task, state, usage_entries=None):
+def generate_report(task_dir, task, state, usage_entries=None, evidence=None):
     stages = [_stage_row(task_dir, state, key) for key in STAGE_ORDER]
+    decision = _decision_summary(task_dir)
+    current = _current_evidence(evidence)
+    if decision is not None:
+        # A recorded decision is history; only bound, current evidence makes
+        # it the decision for the present source.
+        decision["current"] = bool(current["stage08_current"])
+        decision["current_reason"] = current["stage08_reason"]
     report = {
         "schema_version": 1,
         "generated_at": now(),
@@ -47,7 +54,9 @@ def generate_report(task_dir, task, state, usage_entries=None):
         "current_stage": state.get("current_stage"),
         "completed_stages": list(state.get("completed_stages") or []),
         "stages": stages,
-        "decision": _decision_summary(task_dir),
+        "decision": decision,
+        "current_evidence": current,
+        "review_attempts": _review_attempts(evidence),
         "verification": _verification_summary(task_dir),
         "usage": usage_module.summarize(usage_entries or [], group_by="agent"),
         "reasoning_traces": _reasoning_traces(task_dir),
@@ -76,6 +85,41 @@ def _stage_row(task_dir, state, stage_key):
         "duration_seconds": last_run.get("duration_seconds") if last_run else None,
         "failure_class": last_run.get("failure_class") if last_run else None,
         "excerpt": excerpt,
+    }
+
+
+def _current_evidence(evidence):
+    if not evidence:
+        return {
+            "source_identity": None,
+            "current_acceptance": False,
+            "reason": "current evidence could not be evaluated",
+            "stage08_current": False,
+            "stage08_reason": "current evidence could not be evaluated",
+            "stages": {},
+        }
+    identity = evidence.get("source_identity") or {}
+    return {
+        "source_identity": ("sha256:" + identity["fingerprint"]) if identity.get("fingerprint") else None,
+        "source_error": evidence.get("source_error"),
+        "current_acceptance": bool(evidence.get("current_acceptance")),
+        "reason": evidence.get("reason"),
+        "stage08_current": bool((evidence.get("stage08") or {}).get("current")),
+        "stage08_reason": (evidence.get("stage08") or {}).get("reason"),
+        "stages": {
+            key: {"current": bool((evidence.get(key) or {}).get("current")), "reason": (evidence.get(key) or {}).get("reason")}
+            for key in ("verification", "stage06", "stage07", "stage08")
+        },
+    }
+
+
+def _review_attempts(evidence):
+    review = (evidence or {}).get("review_attempts") or {}
+    return {
+        "identity": review.get("identity"),
+        "attempts_used": int(review.get("attempts_used") or 0),
+        "attempts_allowed": int(review.get("attempts_allowed") or 0),
+        "reason": review.get("reason"),
     }
 
 
@@ -191,12 +235,25 @@ def render_markdown(report):
     decision = report.get("decision")
     lines.extend(["", "## Decision", ""])
     if decision:
-        lines.append("Final decision: **%s**" % decision["final_decision"])
+        if decision.get("current"):
+            lines.append("Final decision: **%s** (current)" % decision["final_decision"])
+        else:
+            lines.append("Final decision: **%s** (historical -- not current: %s)" % (decision["final_decision"], decision.get("current_reason") or "unknown"))
         if decision.get("reason_excerpt"):
             lines.append("")
             lines.append("Reason: " + decision["reason_excerpt"])
     else:
         lines.append("Not yet decided (Stage 8 not complete).")
+
+    current = report.get("current_evidence") or {}
+    lines.extend(["", "## Current eligibility", ""])
+    lines.append("Source identity: %s" % (current.get("source_identity") or "unavailable (%s)" % (current.get("source_error") or current.get("reason"))))
+    lines.append("Current acceptance: **%s** (%s)" % ("yes" if current.get("current_acceptance") else "no", current.get("reason")))
+    for key, detail in sorted((current.get("stages") or {}).items()):
+        lines.append("- %s: %s (%s)" % (key, "current" if detail.get("current") else "not current", detail.get("reason")))
+    review = report.get("review_attempts") or {}
+    lines.append("Review-input identity: %s" % (review.get("identity") or "unavailable (%s)" % (review.get("reason") or "unknown")))
+    lines.append("Review attempts: %s/%s used" % (review.get("attempts_used", 0), review.get("attempts_allowed", 0)))
 
     verification = report.get("verification")
     lines.extend(["", "## Verification", ""])

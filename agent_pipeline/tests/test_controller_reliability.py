@@ -628,14 +628,20 @@ class ControllerReliabilityTests(unittest.TestCase):
                 else:
                     candidate_path.write_text(valid_artifact("02"), encoding="utf-8")
                     failure_class = None
-                return {
+                result = {
                     "candidate_artifact_path": str(candidate_path),
                     "failure_class": failure_class,
                     "exit_code": 1 if failure_class else 0,
                     "metadata_path": str(candidate_path) + ".json",
                     "attempt_number": kwargs.get("attempt_number"),
-                    "_source_before": "",
                 }
+                result["_source_before"], source_error = controller.current_source_identity(task_dir_arg)
+                if source_error:
+                    result["_source_before_error"] = source_error
+                excluded = controller.invocation_runtime_paths(task_dir_arg, candidate_path, None)
+                result["_protected_before"] = controller.capture_protected_integrity(task_dir_arg, excluded)
+                result["_protected_excluded_paths"] = [str(path) for path in excluded]
+                return result
 
             original_invoke = controller.invoke_stage
             original_source_snapshot = controller.source_snapshot
@@ -713,13 +719,19 @@ class ControllerReliabilityTests(unittest.TestCase):
                 calls.append(kwargs.get("attempt_number"))
                 candidate_path = task_dir_arg / ("attempt-%s.md" % kwargs.get("attempt_number"))
                 candidate_path.write_text("# malformed\n", encoding="utf-8")
-                return {
+                result = {
                     "candidate_artifact_path": str(candidate_path),
                     "failure_class": FAILURE_CLASS_MALFORMED_ARTIFACT,
                     "exit_code": 1,
                     "metadata_path": str(candidate_path) + ".json",
-                    "_source_before": "",
                 }
+                result["_source_before"], source_error = controller.current_source_identity(task_dir_arg)
+                if source_error:
+                    result["_source_before_error"] = source_error
+                excluded = controller.invocation_runtime_paths(task_dir_arg, candidate_path, None)
+                result["_protected_before"] = controller.capture_protected_integrity(task_dir_arg, excluded)
+                result["_protected_excluded_paths"] = [str(path) for path in excluded]
+                return result
 
             original_invoke = controller.invoke_stage
             original_source_snapshot = controller.source_snapshot
@@ -1346,6 +1358,8 @@ class ControllerReliabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = Path(tmp) / "task"
             task_dir.mkdir(parents=True)
+            # R01-FR1: a real dispatch snapshots every consumed artifact.
+            (task_dir / CONTRACTS["03"].filename).write_text(valid_artifact("03"), encoding="utf-8")
             state = new_state("task", "run-test")
             seen = {}
             original = controller.invoke_agent
@@ -1703,6 +1717,8 @@ class ControllerReliabilityTests(unittest.TestCase):
             controller.subprocess.Popen = FakePopen
             controller.sys.executable = "/fake/python"
             controller.REPO_ROOT = root / "repo"
+            controller.REPO_ROOT.mkdir()
+            (controller.REPO_ROOT / ".git").mkdir()
             self.addCleanup(lambda: setattr(controller.subprocess, "Popen", original_popen))
             self.addCleanup(lambda: setattr(controller.sys, "executable", original_executable))
             self.addCleanup(lambda: setattr(controller, "REPO_ROOT", original_repo_root))
@@ -1719,6 +1735,8 @@ class ControllerReliabilityTests(unittest.TestCase):
             self.assertIs(kwargs["stdout"], kwargs["stderr"])
             self.assertEqual(kwargs["cwd"], str(root / "repo"))
             self.assertTrue(kwargs["start_new_session"])
+            self.assertTrue(kwargs["env"][controller.BACKGROUND_RUN_ID_ENV])
+            self.assertTrue(kwargs["env"][controller.BACKGROUND_ADOPTION_TOKEN_ENV])
             self.assertTrue((root / "bg-task" / ".orchestrator" / "background_run.log").exists())
             self.assertIn("child pid: 4321", output.getvalue())
             self.assertIn("background_run.log", output.getvalue())

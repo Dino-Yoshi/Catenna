@@ -3,7 +3,7 @@ from __future__ import print_function
 import json
 import unittest
 
-from agent_pipeline.overseer import fallback_handoff, parse_overseer_candidate, upgrade_to_auto_verified
+from agent_pipeline.overseer import fallback_handoff, parse_overseer_candidate, parse_persisted_handoff, upgrade_to_auto_verified
 
 
 def valid_payload(**overrides):
@@ -36,10 +36,18 @@ class ParseOverseerCandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_overseer_candidate(valid_payload(route="not_a_real_route"))
 
-    def test_accepts_each_allowed_route(self):
-        for route in ("manual_test", "blocked", "administrator_action", "auto_verified"):
+    def test_accepts_each_agent_proposal_route(self):
+        for route in ("manual_test", "blocked", "administrator_action"):
             result = parse_overseer_candidate(valid_payload(route=route))
             self.assertEqual(result["route"], route)
+
+    def test_rejects_agent_provided_auto_verified_route(self):
+        with self.assertRaises(ValueError):
+            parse_overseer_candidate(valid_payload(route="auto_verified"))
+
+    def test_persisted_controller_auto_verified_route_remains_readable(self):
+        result = parse_persisted_handoff(valid_payload(route="auto_verified"))
+        self.assertEqual(result["route"], "auto_verified")
 
     def test_rejects_non_list_summary(self):
         with self.assertRaises(ValueError):
@@ -79,7 +87,7 @@ class FallbackHandoffTests(unittest.TestCase):
         handoff = fallback_handoff({}, "reason")
         self.assertEqual(handoff["changed_files"], [])
 
-    def test_result_parses_as_a_valid_overseer_candidate(self):
+    def test_result_parses_as_a_valid_persisted_handoff(self):
         # fallback_handoff's own output must satisfy parse_overseer_candidate's
         # contract, since write_handoff_files/downstream code treats both the
         # same way.
@@ -161,7 +169,7 @@ class UpgradeToAutoVerifiedTests(unittest.TestCase):
     def test_result_parses_as_a_valid_overseer_candidate(self):
         handoff = valid_payload(route="manual_test")
         upgraded = upgrade_to_auto_verified(handoff, self.report())
-        parsed = parse_overseer_candidate(upgraded)
+        parsed = parse_persisted_handoff(upgraded)
         self.assertEqual(parsed["route"], "auto_verified")
 
 

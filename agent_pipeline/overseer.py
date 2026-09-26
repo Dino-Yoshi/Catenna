@@ -5,13 +5,32 @@ from __future__ import print_function
 import json
 import time
 
+from .durable import atomic_write_json, atomic_write_text
 
-ALLOWED_ROUTES = set(["manual_test", "blocked", "administrator_action", "auto_verified"])
+
+AGENT_PROPOSAL_ROUTES = set(["manual_test", "blocked", "administrator_action"])
+PERSISTED_HANDOFF_ROUTES = AGENT_PROPOSAL_ROUTES | set(["auto_verified"])
 
 
 def parse_overseer_candidate(text):
+    """Parse an untrusted overseer proposal.
+
+    ``auto_verified`` is deliberately absent: only controller code may add
+    that route after evaluating verification evidence.
+    """
+    return _parse_handoff(text, AGENT_PROPOSAL_ROUTES)
+
+
+def parse_persisted_handoff(text):
+    """Parse a stored handoff, including controller-generated legacy data."""
+    return _parse_handoff(text, PERSISTED_HANDOFF_ROUTES)
+
+
+def _parse_handoff(text, allowed_routes):
     data = text if isinstance(text, dict) else json.loads(text)
-    if data.get("route") not in ALLOWED_ROUTES:
+    if not isinstance(data, dict):
+        raise ValueError("handoff must be a JSON object")
+    if data.get("route") not in allowed_routes:
         raise ValueError("unknown handoff route")
     for key in ("summary", "verified", "needs_human_testing", "known_limitations"):
         if not isinstance(data.get(key), list):
@@ -77,10 +96,10 @@ def write_handoff_files(task_dir, handoff, source):
     legacy_path = task_dir / "handoff.md"
     payload = dict(handoff)
     payload["source"] = source
-    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_json(json_path, payload)
     markdown = render_markdown(payload)
-    md_path.write_text(markdown, encoding="utf-8")
-    legacy_path.write_text(markdown, encoding="utf-8")
+    atomic_write_text(md_path, markdown)
+    atomic_write_text(legacy_path, markdown)
     return {"json_path": str(json_path), "markdown_path": str(md_path), "legacy_path": str(legacy_path)}
 
 

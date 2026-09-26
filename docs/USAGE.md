@@ -155,8 +155,138 @@ The controller state is one of `failures.VALID_STATES`:
 | `failed` | Defined state, but not a clear normal real-driver recovery path in current source. | Inspect `status`, `report`, and artifacts before changing anything; recover based on the concrete failure. |
 | `complete` | All stages are valid on disk. | Read `08_decision.md`; `complete` is not the same as accepted. Treat `reject` and `needs_followup` as real feedback. |
 
-`status`, `dry-run`, and `run` reconcile `.orchestrator/state.json` from the
-artifact files, so valid artifacts on disk are the recovery anchor.
+`status`, `dry-run`, and `run` reconcile artifacts with durable attempt and
+evidence records. A structurally valid report alone is not proof that its
+process succeeded, and uncertain execution is blocked rather than adopted.
+
+## Cleanup safety guarantees
+
+### Explicit decisions
+
+Stage 6 accepts exactly one checked option in its authoritative `## Decision`
+section: `Accept`, `Reject`, or `Needs follow-up`. Narrative wording never
+authorizes progression. Missing, duplicate, or conflicting sections/options
+remain unresolved. Legacy prose-only notes are readable, but an operator must
+add one explicit checkbox choice before Stage 7 can run. Stage 8 applies
+`reject` over `needs_followup` over `accept` when combining current Stage 6
+and Stage 7 evidence.
+
+Automatic Stage 6 acceptance is controller-owned. It requires enabled
+automation, a current passing verification report, at least one configured
+driven-project check with every configured check passing, an unflagged
+coverage signal, and no blocked or administrator-action handoff. Agent output
+claiming `auto_verified` is invalid evidence and cannot grant acceptance.
+
+### Evidence freshness
+
+Verification records the source identity before and after checks. The identity
+covers the Git base/HEAD, index, tracked working files and modes, deletions,
+and non-ignored untracked files; it also binds the consumed brief, gate, and
+effective verification/review configuration. `status` exposes the identity
+that manual notes must cite.
+
+Any applicable source, task-input, or configuration drift makes Stage 6–8
+evidence historical rather than current. Historical artifacts are retained
+for inspection, but `run` cannot return acceptance until new verification or
+manual evidence and review are bound to the current identity. A later failed,
+interrupted, malformed, or otherwise unverified attempt supersedes an older
+pass for the same inputs. Legacy evidence with no identity is historical and
+unverified; it is never upgraded by inference.
+
+### Exclusive execution
+
+`run`, `verify`, and their background forms acquire exclusive ownership for
+the canonical Git worktree as well as the task lock. A competing run or
+verification in the same physical worktree launches no child and reports the
+holder's task, run, host, and process. Symlink and subdirectory aliases resolve
+to the same owner. Separate physical worktrees may proceed independently, and
+read-only supervision commands such as `status` and `report` remain available
+while execution owns the worktree.
+
+`unlock` will not remove live or uncertain task/worktree ownership. Inspect
+the reported owner and child record first; only a positively stale owner can
+be archived by explicit unlock.
+
+### Interruption and recovery
+
+Agent and check children run as managed process groups. SIGINT, SIGTERM, and
+timeouts request group termination, allow at most five seconds for graceful
+exit, then force termination and reap the direct child before releasing
+execution ownership. Partial output and a non-success result are retained.
+
+Before dispatch, the controller durably records the attempt, inputs, retry or
+approval consumption, implementation baseline, and process identity. On
+resume it may adopt a uniquely identified, successfully completed attempt and
+finish promotion once. Incomplete, conflicting, unowned, storage-failed, live,
+or uncertain execution remains blocked. Recovery does not replenish attempts
+or approvals, infer success from report text, reset source, or automatically
+retry an uncertain writer. A failed writer that changed—or may have changed—
+source requires explicit approval bound to that attempt and current source
+before another writer can start.
+
+### Manual acceptance with configured checks
+
+When `verification.driven_project_commands` lists at least one check, those
+checks bind both Stage 6 routes. A manual `Accept` is current only while the
+newest verification for the current source and inputs passed. This is checked
+when the notes are bound, whenever `status`, `dry-run`, or `report` evaluate
+current acceptance, and again at the final Stage 8 boundary. A newer failed,
+interrupted, missing, or unbound check therefore revokes a manual acceptance
+that was previously current. The task waits at `awaiting_human_test` with a
+reason that names the configured check(s). To recover, fix the source and
+re-run `catenna verify`; once a passing verification is bound to unchanged
+source, the same notes proceed. Alternatively, record `Reject` or
+`Needs follow-up`, which never require passing checks. With no configured
+checks, manual-only acceptance works as before.
+
+### Re-review allowance
+
+Stage 7 attempts are counted per review-input identity: a digest of the
+current source identity, the consumed brief/gate/Stage 5 report/review
+configuration, and the bound Stage 6 notes. Each distinct identity gets
+`stage_attempt_budget` review attempts once. The count is recorded durably
+before dispatch, so repeated `run`, crash recovery, or invalidating the same
+identity again never refills it, and a crash after dispatch does not refund
+the attempt. When an identity is exhausted, `run` blocks and names the identity.
+A source, input, or review-configuration change produces a new identity with
+its own allowance. `approve-retry` applies only when `status` shows a pending
+approval ID; the exhausted-identity block does not currently create one.
+`status` prints `review_input_identity` and `review_attempts: used/allowed`,
+and `report` shows the same; earlier attempts stay in history and usage.
+
+### Interruption exit behavior
+
+SIGINT or SIGTERM during `catenna run` or `catenna verify` stops the whole
+invocation, not only the current child. After the managed child is terminated
+and reaped, the controller launches no further agent, check, overseer, or
+setup process. Remaining verification checks are recorded as `not_attempted`,
+and the interrupted check or agent attempt is recorded as `interrupted`. That
+record supersedes any older pass. Under `run`, the task is left `blocked`
+with a `process_interrupted` failure rather than presented as success. Both
+commands exit with status 130. A timeout is different: it fails only that attempt or check, and the remaining
+checks still run.
+
+### Ignoring check output
+
+Source identity is strict: it includes every non-ignored untracked file, and
+there is no configurable exclusion list. A check that writes files into the
+worktree (for example Python's `__pycache__/`, coverage data, or build output)
+therefore changes the source identity during verification. That verification
+then never becomes current. The stale reason lists the changed paths (at most
+20, then a remaining count). When any of them is untracked, it adds a hint
+that check output must be ignored by Git. Add such output to the project's
+`.gitignore` (or `.git/info/exclude`) yourself, for example `__pycache__/`,
+then re-run `catenna verify`. Catenna never edits ignore rules for you.
+
+### Legacy-task limitations
+
+Legacy task artifacts remain readable, but old prose-only decisions require a
+checkbox and old Stage 6–8 evidence without source/provenance identities is not
+current acceptance. The controller preserves historical files instead of
+rewriting them. The legacy Makefile workflow has no equivalent source-bound,
+durable automatic-acceptance guarantee; do not treat its completion as a
+current Python-orchestrator acceptance or migrate a task by copying only its
+final reports.
 
 ## Config Reference
 

@@ -547,7 +547,14 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
         original = verification.run_to_files
         observed = {}
 
-        def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=None, env=None):
+        def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=None, env=None, **kwargs):
+            kwargs["on_launch_identity"]({
+                "pid": 321,
+                "pgid": 321,
+                "host": "fixture-host",
+                "process_start_identity": {"scheme": "fixture", "value": "start"},
+                "run_id": kwargs.get("run_id"),
+            })
             sidecar = Path(stdout_path).with_suffix(".json")
             observed.update(json.loads(sidecar.read_text(encoding="utf-8")))
             Path(stdout_path).write_text("", encoding="utf-8")
@@ -557,12 +564,17 @@ class RunGradleFakeFixtureTests(unittest.TestCase):
         verification.run_to_files = fake_run_to_files
         self.addCleanup(lambda: setattr(verification, "run_to_files", original))
 
-        result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava")
+        result = verification.run_gradle(self.repo_root, self.runs_dir, "compileJava", run_id="verify-run")
 
         self.assertEqual(observed["status"], "running")
         self.assertEqual(observed["name"], "gradle_compileJava")
         self.assertIsInstance(observed["pid"], int)
         self.assertTrue(observed["host"])
+        self.assertEqual(observed["run_id"], "verify-run")
+        self.assertEqual(observed["managed_child"]["pid"], 321)
+        self.assertEqual(observed["managed_child"]["pgid"], 321)
+        self.assertEqual(observed["managed_child"]["run_id"], "verify-run")
+        self.assertEqual(result["managed_child"], observed["managed_child"])
         self.assertEqual(json.loads(Path(result["stdout_path"]).with_suffix(".json").read_text(encoding="utf-8")), result)
 
     def test_missing_gradlew_is_not_attempted(self):
@@ -628,7 +640,7 @@ class DrivenProjectChecksTests(unittest.TestCase):
         seen = {}
         original = verification.run_to_files
 
-        def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=None):
+        def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, cwd=None, **kwargs):
             seen["timeout_seconds"] = timeout_seconds
             seen["cwd"] = cwd
             Path(stdout_path).write_text("", encoding="utf-8")
@@ -862,6 +874,61 @@ class RunVerificationOrchestrationTests(unittest.TestCase):
         )
         with self.assertRaises(verification.VerificationError):
             verification.run_verification(self.task_dir, self.repo_root)
+
+
+class VerificationSourceBindingTests(unittest.TestCase):
+    """C06-FR2: real check subprocesses in a real Git worktree; the report is
+    current only when the source identity before and after checks agrees."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        subprocess.check_call(["git", "init", "-q"], cwd=str(self.repo))
+        (self.repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+        self.task_dir = self.repo / ".agent-pipeline" / "tasks" / "t"
+        self.task_dir.mkdir(parents=True)
+
+    def verify(self, argv):
+        return verification.run_verification(
+            self.task_dir,
+            self.repo,
+            skip_self_check=True,
+            driven_project_commands=[{"name": "check", "argv": argv}],
+        )
+
+    def test_unchanged_source_is_current(self):
+        report = self.verify(["python3", "-c", "pass"])
+        binding = report["source_identity"]
+        self.assertEqual(report["overall_status"], "passed")
+        self.assertTrue(binding["current"])
+        self.assertEqual(binding["before"]["fingerprint"], binding["after"]["fingerprint"])
+        written = json.loads((self.task_dir / "05_verification_report.json").read_text(encoding="utf-8"))
+        self.assertTrue(written["source_identity"]["current"])
+        self.assertIn("Source identity current: **true**", (self.task_dir / "05_verification_report.md").read_text(encoding="utf-8"))
+
+    def test_source_changed_by_a_check_is_not_current(self):
+        report = self.verify(["python3", "-c", "open('generated.py', 'w').write('y = 2')"])
+        binding = report["source_identity"]
+        self.assertEqual(report["overall_status"], "passed")
+        self.assertFalse(binding["current"])
+        self.assertIn("changed while checks ran", binding["reason"])
+
+    def test_unavailable_identity_is_not_current(self):
+        plain = Path(self.tmp.name) / "plain"
+        (plain / "task").mkdir(parents=True)
+        previous = os.environ.get("GIT_CEILING_DIRECTORIES")
+        os.environ["GIT_CEILING_DIRECTORIES"] = self.tmp.name
+        try:
+            report = verification.run_verification(plain / "task", plain, skip_self_check=True, driven_project_commands=[{"name": "check", "argv": ["true"]}])
+        finally:
+            if previous is None:
+                os.environ.pop("GIT_CEILING_DIRECTORIES", None)
+            else:
+                os.environ["GIT_CEILING_DIRECTORIES"] = previous
+        self.assertFalse(report["source_identity"]["current"])
+        self.assertIn("unavailable", report["source_identity"]["reason"])
 
 
 if __name__ == "__main__":

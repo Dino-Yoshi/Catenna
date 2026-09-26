@@ -2,13 +2,13 @@
 
 from __future__ import print_function
 
-import json
 import os
 import errno
 import signal
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -25,10 +25,19 @@ from .failures import (
     FAILURE_CLASS_UNKNOWN_FAILURE,
 )
 from .state import orchestrator_dir
+from .durable import atomic_write_json
+from .locking import process_group_live, process_start_identity, record_managed_child, record_managed_child_launch_state
 
 
 class RealRunnerError(Exception):
     pass
+
+
+class ManagedProcessInterrupted(Exception):
+    def __init__(self, signum):
+        Exception.__init__(self, "managed process interrupted by signal %s" % signum)
+        self.signum = signum
+        self.result = None
 
 
 def invoke_agent(
@@ -47,6 +56,7 @@ def invoke_agent(
     task=None,
     ledger_path=None,
     capture_reasoning=True,
+    repo_root=None,
 ):
     runs_dir = orchestrator_dir(task_dir) / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -75,31 +85,48 @@ def invoke_agent(
     failure_class = None
     partial = False
     real_process_invoked = False
+    child_identity = None
+    interruption = None
 
-    def mark_launched():
-        nonlocal real_process_invoked
+    running_record = {
+        "agent": agent,
+        "provider": agent,
+        "stage": stage_key,
+        "execution_mode": execution_mode,
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "started_at": started,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "run_id": run_id,
+        "pass_number": pass_number,
+        "attempt_number": attempt_number,
+        "attempt_kind": attempt_kind,
+        "retry_reason": retry_reason,
+        "status": "running",
+    }
+
+    def mark_launched(identity=None):
+        nonlocal real_process_invoked, child_identity
         real_process_invoked = True
+        if identity is None:
+            return
+        child_identity = dict(identity)
+        launched_record = dict(running_record)
+        launched_record["managed_child"] = child_identity
+        write_json_atomic(metadata_path, launched_record)
+        if repo_root is not None:
+            record_managed_child(task_dir, repo_root, run_id, child_identity)
 
-    write_json_atomic(
-        metadata_path,
-        {
-            "agent": agent,
-            "provider": agent,
-            "stage": stage_key,
-            "execution_mode": execution_mode,
-            "host": socket.gethostname(),
-            "pid": os.getpid(),
-            "started_at": started,
-            "stdout_path": str(stdout_path),
-            "stderr_path": str(stderr_path),
-            "run_id": run_id,
-            "pass_number": pass_number,
-            "attempt_number": attempt_number,
-            "attempt_kind": attempt_kind,
-            "retry_reason": retry_reason,
-            "status": "running",
-        },
-    )
+    def mark_launch_pending():
+        if repo_root is not None:
+            record_managed_child_launch_state(task_dir, repo_root, run_id, "launch_pending")
+
+    def mark_launch_failed():
+        if repo_root is not None:
+            record_managed_child_launch_state(task_dir, repo_root, run_id, "launch_failed")
+
+    write_json_atomic(metadata_path, running_record)
 
     try:
         argv, metadata_argv = build_argv(agent, detail, execution_mode, prompt_path, candidate_path, config, stage_key)
@@ -107,16 +134,24 @@ def invoke_agent(
             raise RealRunnerError("provider command not found: " + argv[0])
         prompt_text = Path(prompt_path).read_text(encoding="utf-8")
         stdin_text = prompt_text if agent in ("codex", "agy") and uses_stdin(agent, argv) else None
-        exit_code, timed_out = run_to_files(
-            argv,
-            stdout_path,
-            stderr_path,
-            int(config.get("timeout_seconds", 3600)),
-            stdin_text=stdin_text,
-            on_launch=mark_launched,
-        )
-        if timed_out:
-            failure_class = FAILURE_CLASS_TIMEOUT
+        try:
+            exit_code, timed_out = run_to_files(
+                argv,
+                stdout_path,
+                stderr_path,
+                int(config.get("timeout_seconds", 3600)),
+                stdin_text=stdin_text,
+                on_launch_identity=mark_launched,
+                on_before_launch=mark_launch_pending,
+                on_launch_failed=mark_launch_failed,
+                run_id=run_id,
+            )
+            if timed_out:
+                failure_class = FAILURE_CLASS_TIMEOUT
+        except ManagedProcessInterrupted as exc:
+            interruption = exc
+            exit_code = -int(exc.signum)
+            failure_class = FAILURE_CLASS_PROCESS_INTERRUPTED
     except RealRunnerError as exc:
         stdout_path.write_text("", encoding="utf-8")
         stderr_path.write_text(str(exc) + "\n", encoding="utf-8")
@@ -186,66 +221,152 @@ def invoke_agent(
         "attempt_number": attempt_number,
         "attempt_kind": attempt_kind,
         "retry_reason": retry_reason,
-        "status": "passed" if exit_code == 0 and failure_class is None else "failed",
+        "status": "interrupted" if interruption is not None else ("passed" if exit_code == 0 and failure_class is None else "failed"),
         "usage": usage_data,
         "reasoning_path": str(reasoning_path) if reasoning_path else None,
     }
+    if child_identity is not None:
+        result["managed_child"] = child_identity
     write_json_atomic(metadata_path, result)
     result["metadata_path"] = str(metadata_path)
     if ledger_path is not None:
         entry = usage_module.build_entry(task, run_id, stage_key, agent, result, usage_data)
         usage_module.append_entry(ledger_path, entry)
+    if interruption is not None:
+        interruption.result = result
+        raise interruption
     return result
 
 
 def write_json_atomic(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp-%s-%s" % (os.getpid(), int(time.time() * 1000000)))
-    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(str(tmp_path), str(path))
+    atomic_write_json(path, data)
 
 
-def run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, cwd=None, env=None, on_launch=None):
+def run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, cwd=None, env=None, on_launch=None, run_id=None, on_launch_identity=None, on_before_launch=None, on_launch_failed=None):
     """Run argv to completion, writing stdout/stderr to files as they're
     produced. Shared by invoke_agent (agent CLIs) and verification.py
     (gradle/unittest) so there's one subprocess-invocation pattern, not a
-    third ad-hoc one. Returns (exit_code, timed_out); on timeout the process
-    is killed and exit_code is -1."""
+    third ad-hoc one. Returns (exit_code, timed_out). Timeout and controller
+    interruption first request graceful group shutdown, then force and reap."""
     with open(str(stdout_path), "wb") as stdout_handle:
         with open(str(stderr_path), "wb") as stderr_handle:
-            process = subprocess.Popen(
-                argv,
-                stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
-                stdout=stdout_handle,
-                stderr=stderr_handle,
-                cwd=str(cwd) if cwd is not None else None,
-                env=env,
-                start_new_session=True,
-            )
-            if on_launch is not None:
-                on_launch()
+            if on_before_launch is not None:
+                on_before_launch()
             try:
-                process.communicate(
-                    stdin_text.encode("utf-8") if stdin_text is not None else None,
-                    timeout=timeout_seconds,
+                process = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                    cwd=str(cwd) if cwd is not None else None,
+                    env=env,
+                    start_new_session=True,
                 )
-                return process.returncode, False
-            except subprocess.TimeoutExpired:
+            except BaseException:
+                if on_launch_failed is not None:
+                    on_launch_failed()
+                raise
+            child_identity = {
+                "pid": process.pid,
+                # start_new_session=True makes the child the new group leader.
+                "pgid": process.pid,
+                "host": socket.gethostname(),
+                "process_start_identity": process_start_identity(process.pid),
+                "run_id": run_id,
+            }
+            old_handlers = _install_interruption_handlers()
+            try:
+                if on_launch_identity is not None:
+                    on_launch_identity(child_identity)
+                elif on_launch is not None:
+                    on_launch()
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except Exception:
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-                process.communicate()
-                return -1, True
+                    process.communicate(
+                        stdin_text.encode("utf-8") if stdin_text is not None else None,
+                        timeout=timeout_seconds,
+                    )
+                    return process.returncode, False
+                except subprocess.TimeoutExpired:
+                    _terminate_and_reap(process, child_identity["pgid"])
+                    return -1, True
+                except ManagedProcessInterrupted:
+                    _terminate_and_reap(process, child_identity["pgid"])
+                    raise
+                except KeyboardInterrupt:
+                    _terminate_and_reap(process, child_identity["pgid"])
+                    raise ManagedProcessInterrupted(signal.SIGINT)
+            except BaseException:
+                _terminate_and_reap(process, child_identity["pgid"])
+                raise
+            finally:
+                _restore_interruption_handlers(old_handlers)
+
+
+def _signal_interruption(signum, frame):
+    raise ManagedProcessInterrupted(signum)
+
+
+def _install_interruption_handlers():
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    old_handlers = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        old_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, _signal_interruption)
+    return old_handlers
+
+
+def _restore_interruption_handlers(old_handlers):
+    if not old_handlers:
+        return
+    for signum, handler in old_handlers.items():
+        signal.signal(signum, handler)
+
+
+def _terminate_and_reap(process, pgid, grace_seconds=5.0):
+    """Terminate the owned group and always reap its direct child."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            process.terminate()
+        except Exception:
+            pass
+
+    deadline = time.monotonic() + min(5.0, max(0.0, float(grace_seconds)))
+    while time.monotonic() < deadline:
+        process.poll()
+        group_live = process_group_live(pgid)
+        if group_live is False:
+            break
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    if process_group_live(pgid) is not False:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+    try:
+        process.communicate()
+    except Exception:
+        try:
+            process.wait()
+        except Exception:
+            pass
 
 
 def build_argv(agent, detail, execution_mode, prompt_path, candidate_path, config, stage_key):
     command = detail.get("command") or agent
     turn_budget = str(config.get("turn_budgets", {}).get(stage_key, 20))
+    if execution_mode == "read-only" and detail.get("read_only", True) is not True:
+        raise RealRunnerError("provider does not support the configured read-only execution mode")
     if agent == "codex":
         sandbox = "workspace-write" if execution_mode == "workspace-write" else "read-only"
         extra = detail.get("write_args" if execution_mode == "workspace-write" else "read_args", [])
@@ -336,12 +457,12 @@ def command_available(command):
 
 
 def classify(exit_code, stdout_text, stderr_text, agent=None, events=None):
-    if exit_code == 0:
-        return None
     structured = stream_events.structured_failure(agent, stdout_text, events=events)
     if structured:
         return structured
-    if exit_code in (130, -2):
+    if exit_code == 0:
+        return None
+    if exit_code in (130, -2, -15):
         return FAILURE_CLASS_PROCESS_INTERRUPTED
     if exit_code == -1:
         return FAILURE_CLASS_TIMEOUT

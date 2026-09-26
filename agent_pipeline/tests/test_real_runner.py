@@ -1,5 +1,10 @@
 from __future__ import print_function
 
+import json
+import os
+import signal
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -33,6 +38,11 @@ class BuildArgvCodexTests(unittest.TestCase):
         self.assertIn("--json", argv)
         self.assertEqual(argv[-1], "-")
         self.assertEqual(argv, metadata)
+
+    def test_declared_unsupported_read_only_mode_blocks_argv_construction(self):
+        detail = {"command": "codex", "read_only": False, "read_args": [], "write_args": []}
+        with self.assertRaises(real_runner.RealRunnerError):
+            build_argv("codex", detail, "read-only", self.prompt_path, self.candidate_path, self.config, "04")
 
     def test_workspace_write_uses_write_sandbox_and_write_args(self):
         detail = {"command": "codex", "read_args": ["--extra-read"], "write_args": ["--extra-write"]}
@@ -192,8 +202,88 @@ class ClassifyTests(unittest.TestCase):
         stdout = '{"type":"result","subtype":"error_max_turns","is_error":true}'
         self.assertEqual(classify(1, stdout, "", agent="claude"), "max_turns")
 
+    def test_zero_exit_does_not_hide_recognized_terminal_error(self):
+        stdout = '{"type":"turn.failed","error":{"message":"provider failed"}}'
+        self.assertEqual(classify(0, stdout, "", agent="codex"), "unknown_failure")
+
 
 class RunToFilesTests(unittest.TestCase):
+    def test_r04_fr1_c05_fr1_fr2_sigint_and_sigterm_propagate_after_persisted_cleanup(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task_dir = root / "task"
+                task_dir.mkdir()
+                prompt_path = root / "prompt.txt"
+                prompt_path.write_text("prompt\n", encoding="utf-8")
+                candidate_path = task_dir / "04-test.candidate.md"
+                pids_path = root / "pids.json"
+                provider = root / "provider.py"
+                provider.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, subprocess, sys, time\n"
+                    "grand = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                    "open(%r, 'w').write(json.dumps([os.getpid(), grand.pid]))\n"
+                    "print('partial evidence before interruption', flush=True)\n"
+                    "time.sleep(60)\n" % str(pids_path),
+                    encoding="utf-8",
+                )
+                provider.chmod(0o755)
+                result_path = root / "result.json"
+                config = {
+                    "timeout_seconds": 60,
+                    "turn_budgets": {"04": 20},
+                    "roles": {"04": {"primary": "claude"}},
+                    "agents": {"claude": {"command": str(provider), "read_args": [], "write_args": [], "enabled": True}},
+                }
+                worker_code = (
+                    "import json, sys\n"
+                    "from pathlib import Path\n"
+                    "from agent_pipeline.real_runner import ManagedProcessInterrupted, invoke_agent\n"
+                    "try:\n"
+                    "    invoke_agent(Path(%r), %r, 'claude', '04', 'read-only', Path(%r), Path(%r), 'signal-run')\n"
+                    "except ManagedProcessInterrupted as exc:\n"
+                    "    Path(%r).write_text(json.dumps(exc.result), encoding='utf-8')\n"
+                    "    sys.exit(130)\n"
+                ) % (str(task_dir), config, str(prompt_path), str(candidate_path), str(result_path))
+                worker = subprocess.Popen([sys.executable, "-c", worker_code])
+                try:
+                    deadline = time.time() + 5
+                    while time.time() < deadline and not pids_path.exists():
+                        time.sleep(0.02)
+                    self.assertTrue(pids_path.exists(), "managed provider did not launch")
+                    managed_pids = json.loads(pids_path.read_text(encoding="utf-8"))
+                    worker.send_signal(signum)
+                    worker.wait(timeout=10)
+                    self.assertEqual(worker.returncode, 130)
+                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                    self.assertEqual(result["status"], "interrupted")
+                    self.assertEqual(result["failure_class"], "process_interrupted")
+                    self.assertTrue(result["partial"])
+                    self.assertEqual(result["exit_code"], -int(signum))
+                    self.assertEqual(result["managed_child"]["run_id"], "signal-run")
+                    self.assertTrue(result["managed_child"]["host"])
+                    self.assertIsNotNone(result["managed_child"]["process_start_identity"])
+                    self.assertIn("partial evidence", Path(result["stdout_path"]).read_text(encoding="utf-8"))
+                    persisted = json.loads(Path(result["metadata_path"]).read_text(encoding="utf-8"))
+                    self.assertEqual(persisted["status"], "interrupted")
+                    self.assertEqual(persisted["managed_child"], result["managed_child"])
+                    for pid in managed_pids:
+                        deadline = time.time() + 5
+                        while time.time() < deadline and self.process_is_running(pid):
+                            time.sleep(0.05)
+                        self.assertFalse(self.process_is_running(pid), "managed process %s survived interruption" % pid)
+                finally:
+                    if worker.poll() is None:
+                        worker.kill()
+                        worker.wait()
+                    if pids_path.exists():
+                        for pid in json.loads(pids_path.read_text(encoding="utf-8")):
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+
     def test_on_launch_runs_after_popen_returns(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -269,6 +359,20 @@ class RunToFilesTests(unittest.TestCase):
         self.assertEqual((exit_code, timed_out), (-1, True))
         process.kill.assert_called_once_with()
 
+    def test_c05_fr1_grace_deadline_forces_group_and_reaps_direct_child(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch.object(real_runner.time, "monotonic", side_effect=[10.0, 15.0]), \
+                mock.patch.object(real_runner, "process_group_live", return_value=True), \
+                mock.patch.object(real_runner.os, "killpg") as killpg:
+            real_runner._terminate_and_reap(process, 4321)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(4321, signal.SIGTERM), mock.call(4321, signal.SIGKILL)],
+        )
+        process.communicate.assert_called_once_with()
+
     def pid_is_live(self, pid):
         try:
             real_runner.os.kill(pid, 0)
@@ -277,6 +381,14 @@ class RunToFilesTests(unittest.TestCase):
             return False
         except PermissionError:
             return True
+
+    def process_is_running(self, pid):
+        try:
+            text = Path("/proc/%s/stat" % pid).read_text(encoding="utf-8")
+            state = text[text.rfind(")") + 2 :].split()[0]
+            return state != "Z"
+        except FileNotFoundError:
+            return False
 
 
 class ExtractCandidateTests(unittest.TestCase):
@@ -324,8 +436,10 @@ class InvokeAgentOverrideTests(unittest.TestCase):
             original_command_available = real_runner.command_available
             original_run_to_files = real_runner.run_to_files
 
-            def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, on_launch=None, **kwargs):
-                if on_launch:
+            def fake_run_to_files(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, on_launch=None, on_launch_identity=None, **kwargs):
+                if on_launch_identity:
+                    on_launch_identity({"pid": 101, "pgid": 101, "host": "test", "process_start_identity": {"scheme": "test", "value": "1"}, "run_id": kwargs.get("run_id")})
+                elif on_launch:
                     on_launch()
                 Path(stdout_path).write_text("", encoding="utf-8")
                 Path(stderr_path).write_text("", encoding="utf-8")
@@ -346,8 +460,10 @@ class InvokeAgentOverrideTests(unittest.TestCase):
 
             candidate_path_02 = root / "candidate-02.md"
 
-            def fake_run_to_files_02(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, on_launch=None, **kwargs):
-                if on_launch:
+            def fake_run_to_files_02(argv, stdout_path, stderr_path, timeout_seconds, stdin_text=None, on_launch=None, on_launch_identity=None, **kwargs):
+                if on_launch_identity:
+                    on_launch_identity({"pid": 102, "pgid": 102, "host": "test", "process_start_identity": {"scheme": "test", "value": "2"}, "run_id": kwargs.get("run_id")})
+                elif on_launch:
                     on_launch()
                 Path(stdout_path).write_text("", encoding="utf-8")
                 Path(stderr_path).write_text("", encoding="utf-8")

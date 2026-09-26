@@ -2,7 +2,7 @@
 
 from __future__ import print_function
 
-from .artifacts import CONTRACTS, manual_test_decision
+from .artifacts import CONTRACTS, manual_test_decision, validate_text
 from .failures import EXIT_BLOCKED, EXIT_SUCCESS
 from .runner import atomic_finalize
 from .state import append_log
@@ -58,8 +58,16 @@ def ensure_stage08_decision(task_dir, state, block_transition):
     if "08" not in state.get("completed_stages", []):
         stage06_text = (task_dir / CONTRACTS["06"].filename).read_text(encoding="utf-8")
         stage07_text = (task_dir / CONTRACTS["07"].filename).read_text(encoding="utf-8")
-        stage06_outcome = manual_test_decision(stage06_text) or "needs_followup"
-        stage07_verdict = last_nonempty_line(stage07_text) or "needs_followup"
+        stage06_validation = validate_text(stage06_text, CONTRACTS["06"])
+        if not stage06_validation["valid"]:
+            block_transition(task_dir, state, "06", "Stage 6 decision is invalid: " + stage06_validation["reason"], stage06_validation.get("failure_class"), completed_through="05")
+            return EXIT_BLOCKED, None
+        stage07_validation = validate_text(stage07_text, CONTRACTS["07"])
+        if not stage07_validation["valid"]:
+            block_transition(task_dir, state, "07", "Stage 7 review is invalid: " + stage07_validation["reason"], stage07_validation.get("failure_class"), completed_through="06")
+            return EXIT_BLOCKED, None
+        stage06_outcome = manual_test_decision(stage06_text)
+        stage07_verdict = last_nonempty_line(stage07_text)
         final_decision = worse_decision(stage06_outcome, stage07_verdict)
         content = render_stage08_decision(final_decision, stage06_outcome, stage07_verdict)
         result = atomic_finalize(task_dir, "08", content)

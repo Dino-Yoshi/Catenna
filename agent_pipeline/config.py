@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
             "write_args": [],
             "overseer_args": [],
             "workspace_write": True,
+            "read_only": True,
             "enabled": True,
         },
         "claude": {
@@ -73,6 +74,7 @@ DEFAULT_CONFIG = {
             "read_args": [],
             "write_args": [],
             "workspace_write": False,
+            "read_only": True,
             "enabled": True,
         },
         "agy": {
@@ -84,6 +86,7 @@ DEFAULT_CONFIG = {
             "prompt_mode": "auto",
             "stdin_mode_allowed": False,
             "workspace_write": False,
+            "read_only": True,
             "enabled": True,
         },
     },

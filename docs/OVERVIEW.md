@@ -133,14 +133,19 @@ auto_verified_eligible = (
     config.get("enable_auto_verified", True)
     and verification_report is not None
     and verification_report["overall_status"] == "passed"
+    and verification_report["driven_project_checks_configured"] is True
+    and verification_report["driven_project_check_count"] >= 1
+    and all(configured driven-project checks passed)
     and verification_report["test_coverage_delta_signal"]["status"] != "flagged"
     and verification_report["driven_project_verified"] is True
+    and verification evidence is bound to the current source and inputs
+    and handoff route is not blocked or administrator_action
 )
 ```
 
-(`driven_project_verified` was added in the post-Phase-5 hardening pass —
-see "Known gaps" below for what it means for a driven project with no
-`verification.driven_project_commands` configured.)
+The Stage 6 transition evaluates this predicate again. Missing, malformed,
+stale, or inconsistent evidence stays at an explicit manual checkpoint. A
+driven project with no configured checks is not eligible.
 
 and, if eligible and the handoff's route isn't already `blocked`/
 `administrator_action`, calls `overseer.upgrade_to_auto_verified` to force
@@ -159,8 +164,9 @@ checks. A human can always overwrite this file and flip its checkbox before
 Stage 7 runs if they want a real manual pass first.
 
 Stage 08 is synthesized, not agent-generated: `controller.ensure_stage08_decision`
-reads Stage 6's outcome (`artifacts.manual_test_decision`, checkbox- or
-prose-based) and Stage 7's final verdict line, and combines them with a
+reads Stage 6's outcome (`artifacts.manual_test_decision`, exactly one checked
+option in the authoritative decision section) and Stage 7's final verdict
+line, and combines them with a
 "worst wins" rule (`reject` > `needs_followup` > `accept`) into
 `08_decision.md`. `pipeline-run`'s process exit code reflects this: `0` for
 an overall `accept`, `EXIT_VALIDATION` (`1`) otherwise — the pipeline still
@@ -173,8 +179,10 @@ Key modules:
   `contiguous_completed`, `next_stage`, `invalidated_from` staleness cascade).
 - `artifacts.py` — per-stage `ArtifactContract`s (required headings/sections,
   YAML gate blocks, decision-checkbox validation). `manual_test_decision`
-  (Phase 3) classifies a Stage 6 (or Stage 8) outcome as
-  `accept`/`reject`/`needs_followup` from its checkbox or explicit prose.
+  classifies a Stage 6 (or Stage 8) outcome as
+  `accept`/`reject`/`needs_followup` only from exactly one checked option in
+  the authoritative decision section; prose-only legacy notes remain
+  unresolved.
 - `config.py` — `DEFAULT_CONFIG` (`roles: {stage: {primary, fallbacks,
   independent_from?}}`, `turn_budgets`, per-agent CLI settings, plus
   `enable_auto_verified`), merged with `.agent-pipeline/config/orchestrator.json`
@@ -185,8 +193,9 @@ Key modules:
   guarantees a reviewer is never the same agent as the implementer it's
   reviewing (used for Stage `04_gate` vs `04`, and — since Phase 3 — Stage
   `07` vs `05`).
-- `locking.py` — exclusive per-task `lock.json` (`O_EXCL`), host/PID
-  liveness check, explicit unlock archives the stale lock.
+- `locking.py` — atomic per-task locking plus exclusive ownership keyed to the
+  canonical Git worktree, with host/run/process identity. Live or uncertain
+  task, worktree, or managed-child ownership cannot be removed by unlock.
 - `manifest.py` — pre-Stage-5 dirty-tree baseline, diffed after, to
   attribute changed files to the Stage 5 run.
 - `overseer.py` — post-Stage-5 handoff generator: a real agent call
