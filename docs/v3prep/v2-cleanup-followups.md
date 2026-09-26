@@ -1,6 +1,6 @@
 # V2 cleanup follow-ups — Implementation brief
 
-Status: F01–F05 implemented in the working tree on `v2-cleanup`; the [follow-up gate](v2-cleanup-followups-gate.md) stays open until the candidate is committed and re-tested at that commit. Source: the 2026-09-25 consistency audit of R01–R08 against commit `21d83c2` (branch `v2-cleanup`). This brief covers the High and Medium findings I1–I5. Low findings are recorded separately in [2026-09-25-r01-r08-low-findings.md](../audits/2026-09-25-r01-r08-low-findings.md) and are out of scope here.
+Status: F01–F05 implemented and committed on `v2-cleanup` (`19caa04`); the [follow-up gate](v2-cleanup-followups-gate.md) closed 2026-09-25. Source: the 2026-09-25 consistency audit of R01–R08 against commit `21d83c2` (branch `v2-cleanup`). This brief covers the High and Medium findings I1–I5. Low findings are recorded separately in [2026-09-25-r01-r08-low-findings.md](../audits/2026-09-25-r01-r08-low-findings.md) and are out of scope here.
 
 Purpose: fix residual cross-slice gaps before V3. The [V2 cleanup gate](v2-cleanup-gate.md) stays closed for C01–C09 and R01–R08. This brief has its own gate (F05), which must close before any [V3 milestone](v3.md) begins. Deliver F01–F05 in order. F03 depends on F02, and F05 runs last. Requirement IDs are stable identifiers for implementation tasks and regression tests.
 

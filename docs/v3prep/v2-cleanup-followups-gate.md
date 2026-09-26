@@ -1,18 +1,16 @@
 # V2 cleanup follow-up gate
 
-Status: **open** — every F01–F05 requirement row below is `PASS` and I1–I5
-each have a passing regression, but the tested candidate is an uncommitted
-working tree. Per the [follow-up brief](v2-cleanup-followups.md#slice-f05--follow-up-gate)
-this gate stays open until the candidate is committed and the required suites
-pass at that commit. The [C/R cleanup gate](v2-cleanup-gate.md) is not reopened
-by this record. V3 milestone 1 may begin only after both gates are closed.
+Status: **closed** — every F01–F05 requirement row below is `PASS`, I1–I5
+each have a passing regression, and both required suites pass at the committed
+candidate below. The [C/R cleanup gate](v2-cleanup-gate.md) is not reopened by
+this record. With both gates closed, V3 milestone 1 may begin.
 
-Tested revision: none yet — the F01–F05 candidate is the uncommitted working tree on `v2-cleanup` over parent `21d83c232ccdb817cd69aedf19f91049ac9cb888` (the operator requested no commit).
+Tested revision: `19caa04d566bcc87a54a9d345ea2dab3fac6c375`.
 Tested on 2026-09-25 with Linux 6.18 and Python 3.14.7. No paid provider was invoked.
 
 ## Integration results
 
-Run for the working-tree candidate above, after F05.
+Run at the tested revision above (tracked tree clean), 2026-09-25.
 
 | Command | Result | Detail |
 | --- | --- | --- |
@@ -113,5 +111,5 @@ the per-slice `test_f0N_a1_*` guards.
 
 ## Unresolved issues
 
-- The gate is open only because the candidate is uncommitted (see
-  [Closing this gate](#closing-this-gate)).
+None blocking this gate. Deferred low findings I12–I16 are listed in
+[2026-09-25-f01-f05-low-findings.md](../audits/2026-09-25-f01-f05-low-findings.md).
